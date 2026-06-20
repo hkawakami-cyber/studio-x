@@ -160,6 +160,11 @@ SKIP_DOMAINS = frozenset([
     "reddit.com", "zhihu.com", "office.com",
     # 不動産・アパレル等（企業自身のHPでなく業種ポータル）
     "athome.co.jp", "mens-aso.co.jp",
+    # 求人サイト（企業の公式HPではなく求人ページ）
+    "indeed.com", "doda.jp", "rikunabi.com", "mynavi.jp",
+    "en-japan.com", "type.jp", "hatarako.net", "job-gear.jp",
+    # 口コミ・評判サイト
+    "glassdoor.com", "vorkers.com", "openwork.jp",
 ])
 
 # URL パスに含まれる企業情報DB系のシグナルパターン
@@ -1173,6 +1178,34 @@ def run_tests():
             result = normalize_url(url)
             check(f"  {label}", result == expected,
                   f"期待={expected!r}, 実際={result!r}")
+
+    # ── テスト 17: 求人・口コミサイト SKIP_DOMAINS フィルタ ────
+    print("\n▼ Test 17: 求人・口コミサイト SKIP_DOMAINS フィルタ")
+
+    job_bad_urls = [
+        ("https://jp.indeed.com/cmp/TestCo/jobs",          "indeed.com 求人"),
+        ("https://doda.jp/DodaFront/View/Company/123",     "doda.jp 企業ページ"),
+        ("https://rikunabi.com/company/detail/123",        "rikunabi.com 求人"),
+        ("https://job.mynavi.jp/25/pc/corp/corpinfo/123",  "mynavi.jp 求人"),
+        ("https://en-japan.com/companies/12345",           "en-japan.com"),
+        ("https://type.jp/biz/detail/123",                 "type.jp"),
+        ("https://glassdoor.com/Overview/Working-at-123",  "glassdoor.com 口コミ"),
+        ("https://openwork.jp/companies/123",              "openwork.jp 口コミ"),
+        ("https://vorkers.com/company/123",                "vorkers.com 口コミ"),
+    ]
+    # 正常企業HP（これらは除外してはいけない）
+    job_good_urls = [
+        ("https://www.recruit.co.jp/",                    "recruit.co.jp（企業自身のHP）"),
+        ("https://example-jobs.co.jp/recruit/",           "独自採用ページ"),
+        ("https://company.co.jp/en/jobs",                 "/jobs パスは企業HPに存在しうる"),
+    ]
+
+    for url, label in job_bad_urls:
+        check(f"  {label} が除外される",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in job_good_urls:
+        check(f"  {label} は通過する",
+              _is_valid_result_url(url, SKIP_DOMAINS))
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
