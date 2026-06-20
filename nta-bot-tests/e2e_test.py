@@ -29,6 +29,7 @@ nta-bot E2E テスト
  25. extract_page_info + is_soft_error_page 統合テスト（HTML → タイトル/本文抽出 → ソフトエラー判定）
  26. classify_title_quality（タイトル品質分類: no_title / too_short / numeric_only / ok）
  27. check_db_consistency（DB整合性チェック + watchdog 適用後の問題解消確認）
+ 28. fetch_url_batch / fetch_scrape_batch（attempts 上限・バッチサイズ制御テスト）
 """
 
 import asyncio
@@ -521,6 +522,42 @@ def check_db_consistency(conn) -> dict:
         "SELECT COUNT(*) FROM crawl_queue WHERE status='done' AND hp_url IS NULL"
     ).fetchone()[0]
     return issues
+
+
+def fetch_url_batch_sim(conn, batch_size: int = 10, max_attempts: int = 3) -> int:
+    """
+    URLフェーズのバッチ取得ロジックのシミュレーション。
+    status='pending' かつ attempts < max_attempts のレコードを取得し
+    url_searching に移動して attempts を +1。
+    """
+    n = conn.execute(
+        "UPDATE crawl_queue SET status='url_searching', attempts=attempts+1 "
+        "WHERE corporate_number IN ("
+        "  SELECT corporate_number FROM crawl_queue "
+        "  WHERE status='pending' AND attempts < ? LIMIT ?"
+        ")",
+        (max_attempts, batch_size),
+    ).rowcount
+    conn.commit()
+    return n
+
+
+def fetch_scrape_batch_sim(conn, batch_size: int = 10, max_attempts: int = 3) -> int:
+    """
+    スクレイプフェーズのバッチ取得ロジックのシミュレーション。
+    status='url_found' かつ attempts < max_attempts のレコードを取得し
+    scraping に移動して attempts を +1。
+    """
+    n = conn.execute(
+        "UPDATE crawl_queue SET status='scraping', attempts=attempts+1 "
+        "WHERE corporate_number IN ("
+        "  SELECT corporate_number FROM crawl_queue "
+        "  WHERE status='url_found' AND attempts < ? LIMIT ?"
+        ")",
+        (max_attempts, batch_size),
+    ).rowcount
+    conn.commit()
+    return n
 
 
 def write_url_results_sim(conn, results):
@@ -2083,6 +2120,101 @@ def run_tests():
         conn27.close()
     finally:
         for f in [tmp27, tmp27 + "-shm", tmp27 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 28: バッチ取得ロジック（attempts 上限 + バッチサイズ制御）──
+    print("\n▼ Test 28: fetch_url_batch / fetch_scrape_batch（attempts 上限・バッチサイズ）")
+
+    tmp28 = tempfile.mktemp(suffix=".db")
+    try:
+        conn28 = sqlite3.connect(tmp28)
+        conn28.row_factory = sqlite3.Row
+        conn28.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        # pending: attempts 0, 1, 2, 3（3 は max_attempts=3 で除外される）
+        # url_found: attempts 0, 1, 2, 3（3 は除外）
+        conn28.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("P001", "pending-0", "東", "千", "pending",   0, None,                    None, None),
+                ("P002", "pending-1", "東", "千", "pending",   1, None,                    None, None),
+                ("P003", "pending-2", "東", "千", "pending",   2, None,                    None, None),
+                ("P004", "pending-3", "東", "千", "pending",   3, None,                    None, None),  # 上限
+                ("P005", "pending-0b","東", "千", "pending",   0, None,                    None, None),
+                ("U001", "uf-0",      "東", "千", "url_found", 0, "https://a.co.jp",       None, None),
+                ("U002", "uf-1",      "東", "千", "url_found", 1, "https://b.co.jp",       None, None),
+                ("U003", "uf-2",      "東", "千", "url_found", 2, "https://c.co.jp",       None, None),
+                ("U004", "uf-3",      "東", "千", "url_found", 3, "https://d.co.jp",       None, None),  # 上限
+            ],
+        )
+        conn28.commit()
+
+        # ── URL フェーズ: batch_size=2, max_attempts=3 ──
+        n_url = fetch_url_batch_sim(conn28, batch_size=2, max_attempts=3)
+        check("URL バッチ: batch_size=2 → 2 件取得される",
+              n_url == 2, f"実際={n_url}")
+        url_searching_count = conn28.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='url_searching'"
+        ).fetchone()[0]
+        check("URL バッチ: 取得分が url_searching に移行",
+              url_searching_count == 2, f"実際={url_searching_count}")
+        # attempts=3 のレコードが取得されていないこと
+        p004_status = conn28.execute(
+            "SELECT status, attempts FROM crawl_queue WHERE corporate_number='P004'"
+        ).fetchone()
+        check("URL バッチ: attempts=3(上限) のレコードは取得されない",
+              p004_status["status"] == "pending",
+              f"実際={p004_status['status']}")
+
+        # ── URL フェーズ: 2 回目 batch_size=10 → 残り pending から取得 ──
+        n_url2 = fetch_url_batch_sim(conn28, batch_size=10, max_attempts=3)
+        # P001,P002,P003,P005 のうち最初の2件が取得済み → 残り2件
+        check("URL バッチ 2回目: 残りの pending 2 件が取得される",
+              n_url2 == 2, f"実際={n_url2}")
+        # P004(attempts=3) は依然として pending のまま
+        p004_after = conn28.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number='P004'"
+        ).fetchone()
+        check("URL バッチ 2回目: attempts=3 は依然 pending のまま（取得されない）",
+              p004_after["status"] == "pending",
+              f"実際={p004_after['status']}")
+
+        # ── スクレイプフェーズ: batch_size=5, max_attempts=3 ──
+        n_scrape = fetch_scrape_batch_sim(conn28, batch_size=5, max_attempts=3)
+        # U001(0<3), U002(1<3), U003(2<3) が取得対象（3件）
+        # U004(3 は除外)
+        check("スクレイプ バッチ: attempts < 3 の url_found 3 件が取得される",
+              n_scrape == 3, f"実際={n_scrape}")
+        scraping_count = conn28.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='scraping'"
+        ).fetchone()[0]
+        check("スクレイプ バッチ: 取得分が scraping に移行",
+              scraping_count == 3, f"実際={scraping_count}")
+        u004_status = conn28.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number='U004'"
+        ).fetchone()
+        check("スクレイプ バッチ: attempts=3(上限) の url_found は取得されない",
+              u004_status["status"] == "url_found",
+              f"実際={u004_status['status']}")
+
+        # attempts のインクリメント確認
+        u001_after = conn28.execute(
+            "SELECT attempts FROM crawl_queue WHERE corporate_number='U001'"
+        ).fetchone()
+        check("スクレイプ バッチ: 取得後に attempts が +1 される（0→1）",
+              u001_after["attempts"] == 1,
+              f"実際={u001_after['attempts']}")
+
+        conn28.close()
+    finally:
+        for f in [tmp28, tmp28 + "-shm", tmp28 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
