@@ -22,6 +22,7 @@ nta-bot E2E テスト
  18. normalize_url None安全・is_bad_url 長URL・飲食店/予約サイト SKIP_DOMAINS
  19. is_bad_url IPアドレスURL・_is_valid_result_url スキーム検証・政府ポータル SKIP_DOMAINS
  20. normalize_url スキーム/ホスト小文字化・デフォルトポート除去・URLショートナー SKIP_DOMAINS
+ 21. normalize_url クエリパラメータソート・SNS/ニュース/EC サイト SKIP_DOMAINS
 """
 
 import asyncio
@@ -182,6 +183,17 @@ SKIP_DOMAINS = frozenset([
     # URLショートナー（最終的な企業HPではない）
     "bit.ly", "tinyurl.com", "t.co", "goo.gl",
     "ow.ly", "short.io", "lnkd.in", "ift.tt", "buff.ly",
+    # SNS（企業公式アカウントページであっても企業HP本体ではない）
+    "instagram.com", "youtube.com", "tiktok.com",
+    "line.me", "pinterest.com", "tumblr.com",
+    # ニュース・メディア（企業記事ページは企業HPではない）
+    "nikkei.com", "asahi.com", "mainichi.jp", "yomiuri.co.jp",
+    "sankei.com", "jiji.com", "kyodo.co.jp",
+    "prtimes.jp", "dreamnews.jp",
+    # EC・フリマ（出店ページは企業HPではない）
+    "amazon.co.jp", "amazon.com", "rakuten.co.jp",
+    "mercari.com", "yahooshopping.jp", "zozo.jp",
+    "qoo10.jp", "shopping.yahoo.co.jp",
 ])
 
 # URL パスに含まれる企業情報DB系のシグナルパターン
@@ -299,11 +311,11 @@ def normalize_url(url: str | None) -> str | None:
             netloc = host.lower()
         else:
             netloc = p.netloc.lower()
-        # クエリパラメータからトラッキング系を除去
+        # クエリパラメータからトラッキング系を除去してソート（正規化）
         if p.query:
             pairs = [kv for kv in p.query.split("&")
                      if kv.split("=")[0].lower() not in _UTM_PARAMS]
-            query = "&".join(pairs)
+            query = "&".join(sorted(pairs))
         else:
             query = ""
         from urllib.parse import urlunparse
@@ -1396,6 +1408,89 @@ def run_tests():
         check(f"  URLショートナー除外: {label}",
               not _is_valid_result_url(url, SKIP_DOMAINS))
     for url, label in short_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 21: normalize_url クエリソート / SNS・ニュース・EC SKIP_DOMAINS ──
+    print("\n▼ Test 21: normalize_url クエリパラメータソート / SNS・ニュース・EC SKIP_DOMAINS")
+
+    # normalize_url: クエリパラメータのソート（URLの重複排除に重要）
+    norm21_cases = [
+        ("https://example.co.jp/?b=2&a=1",
+         "https://example.co.jp/?a=1&b=2",
+         "クエリパラメータをソート (b,a → a,b)"),
+        ("https://example.co.jp/?z=9&m=5&a=1",
+         "https://example.co.jp/?a=1&m=5&z=9",
+         "3パラメータをソート (z,m,a → a,m,z)"),
+        ("https://example.co.jp/?b=2&utm_source=google&a=1",
+         "https://example.co.jp/?a=1&b=2",
+         "UTM除去後にソート (b, utm_source, a → a,b)"),
+        ("https://example.co.jp/?page=1",
+         "https://example.co.jp/?page=1",
+         "単一パラメータはそのまま"),
+        ("https://example.co.jp/",
+         "https://example.co.jp/",
+         "クエリなしはそのまま"),
+    ]
+    for url, expected, label in norm21_cases:
+        result = normalize_url(url)
+        check(f"  {label}", result == expected,
+              f"期待={expected!r}, 実際={result!r}")
+
+    # SNS SKIP_DOMAINS
+    sns_bad_urls = [
+        ("https://www.instagram.com/company_xyz/",          "instagram.com"),
+        ("https://www.youtube.com/channel/UCxxx",           "youtube.com"),
+        ("https://www.tiktok.com/@company_xyz",             "tiktok.com"),
+        ("https://line.me/R/ti/p/@companyxyz",              "line.me"),
+        ("https://www.pinterest.com/company/",              "pinterest.com"),
+        ("https://company.tumblr.com/",                     "tumblr.com（サブドメイン）"),
+    ]
+    sns_good_urls = [
+        ("https://www.sony.co.jp/",                         "ソニー公式HP"),
+        ("https://panasonic.net/",                          "パナソニック公式HP"),
+    ]
+    for url, label in sns_bad_urls:
+        check(f"  SNS除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in sns_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ニュース・メディア SKIP_DOMAINS
+    news_bad_urls = [
+        ("https://www.nikkei.com/article/DGXZQOUC123/",    "nikkei.com 日経新聞"),
+        ("https://www.asahi.com/articles/ASR123.html",      "asahi.com 朝日新聞"),
+        ("https://mainichi.jp/articles/20260101/",          "mainichi.jp 毎日新聞"),
+        ("https://www.yomiuri.co.jp/economy/123/",          "yomiuri.co.jp 読売新聞"),
+        ("https://prtimes.jp/main/html/rd/p/000000001/",   "prtimes.jp プレスリリース"),
+    ]
+    news_good_urls = [
+        ("https://www.ntt.co.jp/",                         "NTT公式HP"),
+        ("https://news-company.co.jp/",                    "news を含む企業ドメイン"),
+    ]
+    for url, label in news_bad_urls:
+        check(f"  ニュース除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in news_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # EC・フリマ SKIP_DOMAINS
+    ec_bad_urls = [
+        ("https://www.amazon.co.jp/dp/B001234567",         "amazon.co.jp"),
+        ("https://item.rakuten.co.jp/shop/item1/",         "rakuten.co.jp"),
+        ("https://jp.mercari.com/item/m12345678901",        "mercari.com"),
+        ("https://shopping.yahoo.co.jp/product/123/",      "shopping.yahoo.co.jp"),
+    ]
+    ec_good_urls = [
+        ("https://shop.example.co.jp/",                    "独自ECドメイン（企業HP）"),
+        ("https://www.uniqlo.com/jp/ja/",                  "ユニクロ公式HP"),
+    ]
+    for url, label in ec_bad_urls:
+        check(f"  EC除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in ec_good_urls:
         check(f"  正常URL通過: {label}",
               _is_valid_result_url(url, SKIP_DOMAINS))
 
