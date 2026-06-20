@@ -23,6 +23,7 @@ nta-bot E2E テスト
  19. is_bad_url IPアドレスURL・_is_valid_result_url スキーム検証・政府ポータル SKIP_DOMAINS
  20. normalize_url スキーム/ホスト小文字化・デフォルトポート除去・URLショートナー SKIP_DOMAINS
  21. normalize_url クエリパラメータソート・SNS/ニュース/EC サイト SKIP_DOMAINS
+ 22. ワイルドカード SKIP_DOMAINS マッチング（"google." 系）/ normalize_url 末尾スラッシュ正規化
 """
 
 import asyncio
@@ -207,6 +208,26 @@ _BAD_PATH_PATTERNS = re.compile(
 
 _VALID_SCHEMES = frozenset(["http", "https"])
 
+
+def _is_skip_domain(h: str, skip: frozenset) -> bool:
+    """
+    ワイルドカードドメインマッチング。
+    SKIP_DOMAINS に末尾ドット付きエントリ（例: "google."）がある場合、
+    任意TLDのそのドメインにマッチする（google.com, google.co.jp 等）。
+    末尾ドットなしは従来の完全一致・サブドメイン一致。
+    """
+    for d in skip:
+        if d.endswith("."):
+            # "google." → google.com, google.co.jp, google.jp 等にマッチ
+            d_base = d[:-1]
+            if h == d_base or h.startswith(d_base + "."):
+                return True
+        else:
+            if h == d or h.endswith("." + d):
+                return True
+    return False
+
+
 def _is_valid_result_url(url: str, skip: frozenset) -> bool:
     """検索結果URLが有効な企業HPかチェック"""
     try:
@@ -227,8 +248,8 @@ def _is_valid_result_url(url: str, skip: frozenset) -> bool:
             return False  # IPアドレスだった
         except ValueError:
             pass  # ドメイン名（正常）
-        # ドメインが SKIP_DOMAINS に含まれるか
-        if any(h == d or h.endswith("." + d) for d in skip):
+        # ドメインが SKIP_DOMAINS に含まれるか（ワイルドカード対応）
+        if _is_skip_domain(h, skip):
             return False
         # パス・クエリに企業情報DB系シグナルが含まれるか
         path_and_query = p.path + ("?" + p.query if p.query else "")
@@ -318,8 +339,10 @@ def normalize_url(url: str | None) -> str | None:
             query = "&".join(sorted(pairs))
         else:
             query = ""
+        # 空パスを "/" に正規化（https://example.co.jp と /の有無で重複しないよう）
+        path = p.path or "/"
         from urllib.parse import urlunparse
-        normalized = urlunparse((scheme, netloc, p.path, p.params, query, ""))
+        normalized = urlunparse((scheme, netloc, path, p.params, query, ""))
         return normalized or None
     except Exception:
         return None
@@ -1493,6 +1516,57 @@ def run_tests():
     for url, label in ec_good_urls:
         check(f"  正常URL通過: {label}",
               _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 22: ワイルドカード SKIP_DOMAINS / normalize_url 末尾スラッシュ ──
+    print("\n▼ Test 22: ワイルドカード SKIP_DOMAINS / normalize_url 末尾スラッシュ正規化")
+
+    # "google." "facebook." "linkedin." が任意TLDにマッチするか
+    wildcard_bad_urls = [
+        ("https://www.google.com/",            "google.com (TLD: com)"),
+        ("https://www.google.co.jp/",          "google.co.jp (TLD: co.jp)"),
+        ("https://www.google.jp/",             "google.jp (TLD: jp)"),
+        ("https://www.facebook.com/company",   "facebook.com (TLD: com)"),
+        ("https://www.facebook.co.jp/",        "facebook.co.jp (TLD: co.jp)"),
+        ("https://linkedin.com/company/xyz",   "linkedin.com (TLD: com)"),
+        ("https://www.linkedin.co.jp/",        "linkedin.co.jp (TLD: co.jp)"),
+    ]
+    wildcard_good_urls = [
+        ("https://google-partner.co.jp/",      "google- で始まる独自ドメイン"),
+        ("https://not-facebook.co.jp/",        "facebook を含まない独自ドメイン"),
+        ("https://www.toyota.co.jp/",          "無関係の正常ドメイン"),
+    ]
+    for url, label in wildcard_bad_urls:
+        check(f"  ワイルドカード除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in wildcard_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # normalize_url: 末尾スラッシュ正規化（空パス → "/"）
+    norm22_cases = [
+        ("https://example.co.jp",
+         "https://example.co.jp/",
+         "パスなし → 末尾スラッシュ付与"),
+        ("http://example.co.jp",
+         "http://example.co.jp/",
+         "http パスなし → 末尾スラッシュ付与"),
+        ("https://example.co.jp/",
+         "https://example.co.jp/",
+         "既存スラッシュ → そのまま（冪等）"),
+        ("https://example.co.jp/about",
+         "https://example.co.jp/about",
+         "パスあり → 変更なし"),
+        ("https://example.co.jp/about/",
+         "https://example.co.jp/about/",
+         "パスあり末尾スラッシュ → 変更なし"),
+        ("https://example.co.jp?page=1",
+         "https://example.co.jp/?page=1",
+         "パスなし・クエリあり → スラッシュ付与"),
+    ]
+    for url, expected, label in norm22_cases:
+        result = normalize_url(url)
+        check(f"  {label}", result == expected,
+              f"期待={expected!r}, 実際={result!r}")
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
