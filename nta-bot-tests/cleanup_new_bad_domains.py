@@ -57,8 +57,20 @@ NEW_BAD_DOMAINS = [
     "stackoverflow.com",            # 3K: Q&A
     "apps.apple.com",               # 4K: App Store
     "office.com",                   # Microsoft（8K）
-    "ht-tax.or.jp",                 # 4K: 税理士サポートサイト（同一URL大量流用）
-    "origamijapan.net",             # 3K: 折り紙関連ポータル（同一URL大量流用）
+    # ── 同一URL大量流用（ポータル・特定企業HP が誤ってマッチ）──
+    "ht-tax.or.jp",                 # 4K: 税理士サポートサイト
+    "origamijapan.net",             # 3K: 折り紙関連ポータル
+    "amano.co.jp",                  # 4K: アマノ社HP（同社製品ユーザーに誤マッチ）
+    "kanjipedia.jp",                # 3K: 漢字辞典
+    "gotokyo.org",                  # 3K: 東京観光サイト
+    "chigai4.fromation.co.jp",      # 3K: 比較サイト
+    "npb.jp",                       # 3K: NPB野球公式
+    "data-max.co.jp",               # 2K: 企業情報DB
+    "forums.commentcamarche.net",   # 2K: フランス語フォーラム
+    "npo-homepage.go.jp",           # 2K: NPO法人ポータル
+    "japan-company.net",            # 2K: 企業情報DB
+    "jpnculture.net",               # 2K: 日本文化ポータル
+    "biz.moneyforward.com",         # 2K: 会計ソフト（企業HPではない）
     # ── SNS（既存 SKIP_DOMAINS の補完）──────────────────────────
     "twitter.com",
     "x.com",
