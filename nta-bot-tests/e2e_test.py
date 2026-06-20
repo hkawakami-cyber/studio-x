@@ -231,8 +231,31 @@ def reset_stuck_watchdog(conn):
         "UPDATE crawl_queue SET status='skip', error='fetch_failed_permanent' "
         "WHERE status='error' AND error LIKE 'fetch_failed%'"
     ).rowcount
+    # url_found で hp_url=NULL のものは URL再検索キューへ（無限ループ防止）
+    n_null_url = conn.execute(
+        "UPDATE crawl_queue SET status='url_failed', attempts=0 "
+        "WHERE status='url_found' AND hp_url IS NULL"
+    ).rowcount
     conn.commit()
-    return n_pending, n_url_found, n_error, n_skip
+    return n_pending, n_url_found, n_error, n_skip, n_null_url
+
+
+def write_scrape_results_sim(conn, results):
+    """write_scrape_results の改善版シミュレーション（no_url も url_failed に移動）"""
+    for r in results:
+        ok = r.get("ok", False)
+        if r.get("error") in ("bad_url", "not_found", "blocked", "no_url"):
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_failed', hp_url=NULL, error=?, attempts=0 "
+                "WHERE corporate_number=?",
+                (r.get("error"), r["corporate_number"]),
+            )
+            continue
+        conn.execute(
+            "UPDATE crawl_queue SET status=?, error=? WHERE corporate_number=?",
+            ("done" if ok else "error", r.get("error"), r["corporate_number"]),
+        )
+    conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -373,7 +396,7 @@ def run_tests():
                       "error", 3, None, "timeout", None))
         conn.commit()
 
-        n_p, n_u, n_e, n_s = reset_stuck_watchdog(conn)
+        n_p, n_u, n_e, n_s, n_nu = reset_stuck_watchdog(conn)
 
         # fetch_failed_permanent は skip に移動済み
         ff_row = conn.execute(
@@ -416,30 +439,36 @@ def run_tests():
         """)
 
         # fetch_failed が error に溜まっている状態を再現
-        test_data = [
-            ("A001", "fetch_failed error 1", "error", "fetch_failed"),
-            ("A002", "fetch_failed error 2", "error", "fetch_failed"),
-            ("A003", "通常 error（リトライ可）", "error", "timeout"),
-            ("A004", "通常 error（error=NULL）", "error", None),
-            ("A005", "url_searching スタック", "url_searching", None),
+        # A003: hp_url あり → error → url_found（再スクレイプ）
+        # A004: hp_url なし → error → url_found → url_failed（URL再検索）
+        test_data6 = [
+            ("A001", "fetch_failed error 1", "error", "fetch_failed", None),
+            ("A002", "fetch_failed error 2", "error", "fetch_failed", None),
+            ("A003", "通常 error (hp_url あり)", "error", "timeout", "https://a.co.jp"),
+            ("A004", "通常 error (hp_url なし)", "error", None, None),
+            ("A005", "url_searching スタック", "url_searching", None, None),
         ]
-        for num, name, status, error in test_data:
+        for num, name, status, error, hp_url in test_data6:
             conn6.execute(
                 "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
-                (num, name, "東京都", "千代田区", status, 2, None, error, None),
+                (num, name, "東京都", "千代田区", status, 2, hp_url, error, None),
             )
         conn6.commit()
 
-        n_p, n_u, n_e, n_s = reset_stuck_watchdog(conn6)
+        n_p, n_u, n_e, n_s, n_nu = reset_stuck_watchdog(conn6)
 
         # fetch_failed → skip に移動されているか
         ff_rows = conn6.execute(
             "SELECT status, error FROM crawl_queue WHERE corporate_number IN ('A001','A002')"
         ).fetchall()
-        # 通常 error → url_found に昇格しているか
-        normal_rows = conn6.execute(
-            "SELECT status FROM crawl_queue WHERE corporate_number IN ('A003','A004')"
-        ).fetchall()
+        # hp_url あり error → url_found で再スクレイプ
+        a003_row = conn6.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number='A003'"
+        ).fetchone()
+        # hp_url なし error → url_found → url_failed（URL再検索キューへ連鎖）
+        a004_row = conn6.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number='A004'"
+        ).fetchone()
 
         check("fetch_failed error が skip に移動される（自動skip）",
               all(r["status"] == "skip" for r in ff_rows),
@@ -448,9 +477,12 @@ def run_tests():
               all(r["error"] == "fetch_failed_permanent" for r in ff_rows),
               f"実際: {[r['error'] for r in ff_rows]}")
         check("自動skip件数が2件", n_s == 2, f"実際={n_s}")
-        check("通常 error は url_found に昇格する",
-              all(r["status"] == "url_found" for r in normal_rows),
-              f"実際: {[r['status'] for r in normal_rows]}")
+        check("error(hp_url あり) は url_found に昇格する（再スクレイプ）",
+              a003_row["status"] == "url_found",
+              f"実際={a003_row['status']}")
+        check("error(hp_url なし) は url_failed に移動する（URL再検索）",
+              a004_row["status"] == "url_failed",
+              f"実際={a004_row['status']}")
         check("url_searching は pending に戻る", n_p >= 1, f"件数={n_p}")
 
         conn6.close()
@@ -733,6 +765,136 @@ def run_tests():
         conn11.close()
     finally:
         for f in [tmp11, tmp11 + "-shm", tmp11 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 12: watchdog url_found(hp_url=NULL) → url_failed ──
+    print("\n▼ Test 12: watchdog url_found(hp_url=NULL) → url_failed 自動移動")
+
+    tmp12 = tempfile.mktemp(suffix=".db")
+    try:
+        conn12 = sqlite3.connect(tmp12)
+        conn12.row_factory = sqlite3.Row
+        conn12.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn12.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                # hp_url=NULL の url_found（URLフェーズが何も見つけなかった）
+                ("D001", "URL未発見1", "東", "千", "url_found", 3, None, None, None),
+                ("D002", "URL未発見2", "東", "千", "url_found", 2, None, None, None),
+                # hp_url ありの url_found（正常、変更しない）
+                ("D003", "URL発見済み", "東", "千", "url_found", 1,
+                 "https://example.co.jp", None, None),
+                # url_searching スタック（pending に戻る）
+                ("D004", "url_searching", "東", "千", "url_searching", 1, None, None, None),
+            ],
+        )
+        conn12.commit()
+
+        n_p, n_u, n_e, n_s, n_nu = reset_stuck_watchdog(conn12)
+
+        null_rows = conn12.execute(
+            "SELECT status, attempts FROM crawl_queue WHERE corporate_number IN ('D001','D002')"
+        ).fetchall()
+        valid_row = conn12.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number='D003'"
+        ).fetchone()
+
+        check("url_found(hp_url=NULL) が url_failed に移動される",
+              all(r["status"] == "url_failed" for r in null_rows),
+              f"実際: {[r['status'] for r in null_rows]}")
+        check("url_found(hp_url=NULL) の attempts が 0 にリセットされる",
+              all(r["attempts"] == 0 for r in null_rows),
+              f"実際: {[r['attempts'] for r in null_rows]}")
+        check("url_found(hp_url あり) は変更されない",
+              valid_row["status"] == "url_found",
+              f"実際={valid_row['status']}")
+        check("url_found NULL 移動件数が 2 件", n_nu == 2, f"実際={n_nu}")
+        check("url_searching → pending 件数が 1 件", n_p == 1, f"実際={n_p}")
+
+        conn12.close()
+    finally:
+        for f in [tmp12, tmp12 + "-shm", tmp12 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 13: write_scrape_results の no_url → url_failed 処理 ──
+    print("\n▼ Test 13: write_scrape_results no_url → url_failed (URL再検索キューへ)")
+
+    tmp13 = tempfile.mktemp(suffix=".db")
+    try:
+        conn13 = sqlite3.connect(tmp13)
+        conn13.row_factory = sqlite3.Row
+        conn13.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn13.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("E001", "no_url企業", "東", "千", "scraping", 2, None, None, None),
+                ("E002", "bad_url企業", "東", "千", "scraping", 2,
+                 "https://s.yimg.jp/icon.ico", None, None),
+                ("E003", "not_found企業", "東", "千", "scraping", 2,
+                 "https://gone.example.co.jp", None, None),
+                ("E004", "正常企業", "東", "千", "scraping", 1,
+                 "https://ok.example.co.jp", None, None),
+                ("E005", "fetch_failed企業", "東", "千", "scraping", 3,
+                 "https://dead.example.co.jp", None, None),
+            ],
+        )
+        conn13.commit()
+
+        results = [
+            {"corporate_number": "E001", "ok": False, "error": "no_url"},
+            {"corporate_number": "E002", "ok": False, "error": "bad_url"},
+            {"corporate_number": "E003", "ok": False, "error": "not_found",
+             "hp_url": "https://gone.example.co.jp"},
+            {"corporate_number": "E004", "ok": True, "hp_url": "https://ok.example.co.jp"},
+            {"corporate_number": "E005", "ok": False, "error": "fetch_failed",
+             "hp_url": "https://dead.example.co.jp"},
+        ]
+        write_scrape_results_sim(conn13, results)
+
+        rows = {r["corporate_number"]: r for r in
+                conn13.execute("SELECT * FROM crawl_queue").fetchall()}
+
+        check("no_url → url_failed に移動（URL再検索キューへ）",
+              rows["E001"]["status"] == "url_failed",
+              f"実際={rows['E001']['status']}")
+        check("no_url → hp_url が NULL クリアされる",
+              rows["E001"]["hp_url"] is None,
+              f"実際={rows['E001']['hp_url']}")
+        check("no_url → attempts が 0 にリセットされる",
+              rows["E001"]["attempts"] == 0,
+              f"実際={rows['E001']['attempts']}")
+        check("bad_url → url_failed に移動される",
+              rows["E002"]["status"] == "url_failed",
+              f"実際={rows['E002']['status']}")
+        check("not_found (404) → url_failed に移動される",
+              rows["E003"]["status"] == "url_failed",
+              f"実際={rows['E003']['status']}")
+        check("正常スクレイプ → done に移動される",
+              rows["E004"]["status"] == "done",
+              f"実際={rows['E004']['status']}")
+        check("fetch_failed → error に移動される（skipは watchdog が担当）",
+              rows["E005"]["status"] == "error",
+              f"実際={rows['E005']['status']}")
+
+        conn13.close()
+    finally:
+        for f in [tmp13, tmp13 + "-shm", tmp13 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
