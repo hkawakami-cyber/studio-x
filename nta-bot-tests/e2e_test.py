@@ -137,12 +137,28 @@ SKIP_DOMAINS = frozenset([
     "kotobank.jp", "baseconnect.in", "manareki.com", "data-link-plus.com",
     "kensetumap.com", "salesnow.jp", "g-search.or.jp", "houjin.com",
     "kigyolog.com", "uijin.com", "biz-maps.com", "navi-i.jp",
+    # スクリーニングで新発見（2026-06-20 追加）
+    "yayoi-kk.co.jp", "nabutan.com", "companydata.tsujigawa.com",
+    "kaisharesearch.com", "houjin.info", "houjin.jp", "houjin.goo.to",
+    "companyinformation.jp", "compalyze.co.jp", "korps.jp",
+    "tsukulink.net", "kawasaki-connect.jp", "alarmbox.jp",
+    "web.suke-dachi.jp", "toukibo.ai-con.lawyer",
+    "weblio.jp", "ejje.weblio.jp", "kanji.jitenon.jp", "myoji-yurai.net",
+    "navitime.co.jp", "mhlw.go.jp",
+    # 市区町村公式サイト（企業HPではない）
+    "city.minato.tokyo.jp", "city.yokohama.lg.jp", "city.sapporo.jp",
+    # 外国サイト・汎用サービス
+    "reddit.com", "zhihu.com", "office.com",
+    # 不動産・アパレル等（企業自身のHPでなく業種ポータル）
+    "athome.co.jp", "mens-aso.co.jp",
 ])
 
 def _is_valid_result_url(url: str, skip: frozenset) -> bool:
     """検索結果URLが有効な企業HPかチェック"""
     try:
-        h = urlparse(url).netloc.lstrip("www.")
+        netloc = urlparse(url).netloc
+        # NOTE: lstrip("www.") は文字集合扱いになるバグがある → removeprefix を使う
+        h = netloc.removeprefix("www.")
         return bool(h) and not any(
             h == d or h.endswith("." + d) for d in skip
         )
@@ -484,6 +500,100 @@ def run_tests():
             check(f"fetch_html タプル展開", False, str(e))
 
     asyncio.run(test_tuple_returns())
+
+    # ── テスト 7: 新規不良ドメイン（2026-06-20 スクリーニング発見分）──
+    print("\n▼ Test 7: 新規不良ドメイン SKIP_DOMAINS フィルタ")
+
+    new_bad_urls = [
+        ("https://www.yayoi-kk.co.jp/companies/123",           "yayoi-kk.co.jp (78K件)"),
+        ("https://nabutan.com/hojin/456",                       "nabutan.com (64K件)"),
+        ("https://companydata.tsujigawa.com/company/789",       "companydata.tsujigawa.com (47K件)"),
+        ("https://navitime.co.jp/spot/00001234",                "navitime.co.jp (44K件)"),
+        ("https://kanji.jitenon.jp/kanji/abc",                  "kanji.jitenon.jp (42K件)"),
+        ("https://kaisharesearch.com/hojin/100",                "kaisharesearch.com (32K件)"),
+        ("https://houjin.info/company/200",                     "houjin.info (部分)"),
+        ("https://houjin.jp/hojin/300",                         "houjin.jp (部分)"),
+        ("https://weblio.jp/content/テスト",                    "weblio.jp (26K件)"),
+        ("https://ejje.weblio.jp/content/example",              "ejje.weblio.jp"),
+        ("https://toukibo.ai-con.lawyer/hojin/400",             "toukibo.ai-con.lawyer (21K件)"),
+        ("https://mhlw.go.jp/stf/seisakunitsuite/bunya/500",   "mhlw.go.jp (16K件)"),
+        ("https://city.yokohama.lg.jp/kurashi/",                "city.yokohama.lg.jp (市区町村)"),
+        ("https://city.sapporo.jp/shisei/",                     "city.sapporo.jp (市区町村)"),
+        ("https://city.minato.tokyo.jp/joho/",                  "city.minato.tokyo.jp (市区町村)"),
+        ("https://reddit.com/r/japan/comments/123",             "reddit.com (外国)"),
+        ("https://zhihu.com/question/456",                      "zhihu.com (中国)"),
+        ("https://office.com/launch/word",                      "office.com (MS)"),
+        ("https://athome.co.jp/mansion/list/",                  "athome.co.jp (不動産)"),
+        ("https://myoji-yurai.net/searchResult.htm?myojiKanji=山田", "myoji-yurai.net"),
+        ("https://companyinformation.jp/company/600",           "companyinformation.jp"),
+        ("https://compalyze.co.jp/hojin/700",                   "compalyze.co.jp"),
+        ("https://korps.jp/company/800",                        "korps.jp"),
+        ("https://tsukulink.net/hojin/900",                     "tsukulink.net"),
+    ]
+    # 新規ドメインはすべて除外されるべき
+    for url, label in new_bad_urls:
+        check(
+            f"  {label} が除外される",
+            not _is_valid_result_url(url, SKIP_DOMAINS),
+        )
+
+    # 新規クリーンアップ対象のDB操作テスト
+    tmp7 = tempfile.mktemp(suffix=".db")
+    try:
+        conn7 = sqlite3.connect(tmp7)
+        conn7.execute("PRAGMA journal_mode=WAL")
+        conn7.row_factory = sqlite3.Row
+        conn7.executescript("""
+            CREATE TABLE corporations (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, kind TEXT,
+                hp_url TEXT, hp_title TEXT, hp_scraped_at TEXT
+            );
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        # 新規不良ドメインのレコードをセット（done済み）
+        new_bad_sample = [
+            ("B001", "弥生テスト", "https://www.yayoi-kk.co.jp/companies/1"),
+            ("B002", "ナビタイムテスト", "https://navitime.co.jp/spot/00001"),
+            ("B003", "ウェブリオテスト", "https://weblio.jp/content/テスト"),
+            ("B004", "市役所テスト", "https://city.yokohama.lg.jp/kurashi/"),
+        ]
+        for num, name, url in new_bad_sample:
+            conn7.execute("INSERT INTO corporations VALUES (?,?,?,?,?,?)",
+                          (num, name, "2015-10-05", url, "タイトル", "2026-06-01T00:00:00+00:00"))
+            conn7.execute("INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+                          (num, name, "東京都", "千代田区", "done", 3, url, None, None))
+        conn7.commit()
+
+        new_bad_domains = [
+            "yayoi-kk.co.jp", "navitime.co.jp", "weblio.jp", "city.yokohama.lg.jp",
+        ]
+        total_corp7, total_queue7 = reset_bad_domains(conn7, new_bad_domains)
+
+        after7 = conn7.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='pending'"
+        ).fetchone()[0]
+        corp_null7 = conn7.execute(
+            "SELECT COUNT(*) FROM corporations WHERE hp_url IS NULL"
+        ).fetchone()[0]
+
+        check("新規不良ドメイン: corporations が NULL クリアされる",
+              corp_null7 == 4, f"実際={corp_null7}")
+        check("新規不良ドメイン: crawl_queue が pending に戻る",
+              after7 == 4, f"実際={after7}")
+        check("新規不良ドメイン: corporations クリア件数が正しい",
+              total_corp7 == 4, f"実際={total_corp7}")
+
+        conn7.close()
+    finally:
+        for f in [tmp7, tmp7 + "-shm", tmp7 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
