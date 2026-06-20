@@ -31,7 +31,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DEFAULT_DB = Path.home() / "Downloads/nta-bot/data/crawl.db"
+DEFAULT_DB   = Path.home() / "Downloads/nta-bot/data/crawl.db"
+DEFAULT_OUT_DIR = Path.home() / "Downloads/nta-bot"
 COLUMNS = [
     "corporate_number",
     "name",
@@ -70,8 +71,10 @@ def main():
     parser = argparse.ArgumentParser(description="nta-bot クロール結果 CSV エクスポート")
     parser.add_argument("db", nargs="?", default=str(DEFAULT_DB),
                         help=f"SQLite DB パス (デフォルト: {DEFAULT_DB})")
-    parser.add_argument("-o", "--output", default=None,
-                        help="出力 CSV ファイルパス (デフォルト: stdout)")
+    from datetime import date
+    default_out = str(DEFAULT_OUT_DIR / f"crawl_export_{date.today():%Y%m%d}.csv")
+    parser.add_argument("-o", "--output", default=default_out,
+                        help=f"出力 CSV ファイルパス (デフォルト: {default_out})")
     parser.add_argument("--done-only", action="store_true",
                         help="status='done' のレコードのみ出力")
     parser.add_argument("--status", default=None,
@@ -106,8 +109,10 @@ def main():
 
     if args.output:
         out_path = Path(args.output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         f = open(out_path, "w", newline="", encoding="utf-8-sig")
         close_file = True
+        print(f"出力先: {out_path}", file=sys.stderr)
     else:
         f = sys.stdout
         close_file = False
