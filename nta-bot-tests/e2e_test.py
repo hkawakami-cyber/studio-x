@@ -8,6 +8,14 @@ nta-bot E2E テスト
   4. watchdog の fetch_failed_permanent 除外ロジック
   5. fetch_html タプル戻り値の互換性チェック
   6. watchdog の fetch_failed 自動 skip 機能
+  7. 新規不良ドメイン（スクリーニング発見分）フィルタ
+  8. lstrip バグ vs removeprefix 差異
+  9. scrape_worker hp_url=NULL 早期 return
+ 10. RETRY_AT 境界値
+ 11. url_found スタック防止 attempts リセット
+ 12. watchdog url_found(hp_url=NULL) → url_failed 自動移動
+ 13. write_scrape_results no_url → url_failed
+ 14. url_failed エラー分類別再試行戦略
 """
 
 import asyncio
@@ -895,6 +903,95 @@ def run_tests():
         conn13.close()
     finally:
         for f in [tmp13, tmp13 + "-shm", tmp13 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 14: url_failed エラー分類別再試行戦略 ─────────
+    print("\n▼ Test 14: url_failed エラー分類別再試行戦略")
+
+    def triage_url_failed(conn):
+        """url_failed のエラー種別ごとに最適な次のステータスへ移動する"""
+        # not_found (404): そのURLは存在しない → skip（再試行不要）
+        n_not_found = conn.execute(
+            "UPDATE crawl_queue SET status='skip', error='not_found_permanent' "
+            "WHERE status='url_failed' AND error='not_found'"
+        ).rowcount
+        # bad_url (CDN/画像URL): URLが無効 → pending に戻して URL再検索
+        n_bad_url = conn.execute(
+            "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+            "WHERE status='url_failed' AND error='bad_url'"
+        ).rowcount
+        # blocked (403/429): 一時的なブロック → pending に戻して後でリトライ
+        n_blocked = conn.execute(
+            "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+            "WHERE status='url_failed' AND error='blocked'"
+        ).rowcount
+        # no_url: URL未発見 → pending に戻して URL再検索
+        n_no_url = conn.execute(
+            "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+            "WHERE status='url_failed' AND error='no_url'"
+        ).rowcount
+        conn.commit()
+        return n_not_found, n_bad_url, n_blocked, n_no_url
+
+    tmp14 = tempfile.mktemp(suffix=".db")
+    try:
+        conn14 = sqlite3.connect(tmp14)
+        conn14.row_factory = sqlite3.Row
+        conn14.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn14.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("F001", "404企業", "東", "千", "url_failed", 3,
+                 "https://gone.co.jp", "not_found", None),
+                ("F002", "CDN企業", "東", "千", "url_failed", 2,
+                 "https://s.yimg.jp/icon.ico", "bad_url", None),
+                ("F003", "403企業", "東", "千", "url_failed", 2,
+                 "https://blocked.co.jp", "blocked", None),
+                ("F004", "URL未発見企業", "東", "千", "url_failed", 3,
+                 None, "no_url", None),
+                ("F005", "通常失敗企業", "東", "千", "url_failed", 1,
+                 "https://timeout.co.jp", "fetch_failed", None),
+            ],
+        )
+        conn14.commit()
+
+        n_nf, n_bu, n_bl, n_nu = triage_url_failed(conn14)
+        rows = {r["corporate_number"]: r for r in
+                conn14.execute("SELECT * FROM crawl_queue").fetchall()}
+
+        check("not_found(404) → skip に移動（再試行不要）",
+              rows["F001"]["status"] == "skip", f"実際={rows['F001']['status']}")
+        check("not_found(404) → error が not_found_permanent になる",
+              rows["F001"]["error"] == "not_found_permanent",
+              f"実際={rows['F001']['error']}")
+        check("bad_url(CDN等) → pending に戻り hp_url クリア（URL再検索）",
+              rows["F002"]["status"] == "pending" and rows["F002"]["hp_url"] is None,
+              f"実際={rows['F002']['status']}, hp_url={rows['F002']['hp_url']}")
+        check("blocked(403) → pending に戻りリトライ",
+              rows["F003"]["status"] == "pending",
+              f"実際={rows['F003']['status']}")
+        check("no_url → pending に戻り URL再検索",
+              rows["F004"]["status"] == "pending" and rows["F004"]["hp_url"] is None,
+              f"実際={rows['F004']['status']}, hp_url={rows['F004']['hp_url']}")
+        check("fetch_failed は triage 対象外（変更なし）",
+              rows["F005"]["status"] == "url_failed",
+              f"実際={rows['F005']['status']}")
+        check("not_found 件数が 1 件", n_nf == 1, f"実際={n_nf}")
+        check("bad_url 件数が 1 件", n_bu == 1, f"実際={n_bu}")
+        check("blocked 件数が 1 件", n_bl == 1, f"実際={n_bl}")
+        check("no_url 件数が 1 件", n_nu == 1, f"実際={n_nu}")
+
+        conn14.close()
+    finally:
+        for f in [tmp14, tmp14 + "-shm", tmp14 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
