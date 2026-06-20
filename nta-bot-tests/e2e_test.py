@@ -15,7 +15,7 @@ nta-bot E2E テスト
  11. url_found スタック防止 attempts リセット
  12. watchdog url_found(hp_url=NULL) → url_failed 自動移動
  13. write_scrape_results no_url → url_failed
- 14. url_failed エラー分類別再試行戦略
+ 14. url_failed エラー分類別再試行戦略（fetch_failed の attempts 分岐含む）
 """
 
 import asyncio
@@ -968,8 +968,17 @@ def run_tests():
             "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
             "WHERE status='url_failed' AND error='no_url'"
         ).rowcount
+        # fetch_failed: 接続失敗 → attempts が少なければ pending リトライ、多ければ skip
+        n_ff_retry = conn.execute(
+            "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+            "WHERE status='url_failed' AND error='fetch_failed' AND attempts < 3"
+        ).rowcount
+        n_ff_skip = conn.execute(
+            "UPDATE crawl_queue SET status='skip', error='fetch_failed_permanent' "
+            "WHERE status='url_failed' AND error='fetch_failed' AND attempts >= 3"
+        ).rowcount
         conn.commit()
-        return n_not_found, n_bad_url, n_blocked, n_no_url
+        return n_not_found, n_bad_url, n_blocked, n_no_url, n_ff_retry, n_ff_skip
 
     tmp14 = tempfile.mktemp(suffix=".db")
     try:
@@ -994,13 +1003,17 @@ def run_tests():
                  "https://blocked.co.jp", "blocked", None),
                 ("F004", "URL未発見企業", "東", "千", "url_failed", 3,
                  None, "no_url", None),
-                ("F005", "通常失敗企業", "東", "千", "url_failed", 1,
+                # fetch_failed: attempts<3 → pending リトライ
+                ("F005", "失敗少数企業", "東", "千", "url_failed", 1,
                  "https://timeout.co.jp", "fetch_failed", None),
+                # fetch_failed: attempts>=3 → skip（諦め）
+                ("F006", "繰返失敗企業", "東", "千", "url_failed", 3,
+                 "https://dead.co.jp", "fetch_failed", None),
             ],
         )
         conn14.commit()
 
-        n_nf, n_bu, n_bl, n_nu = triage_url_failed(conn14)
+        n_nf, n_bu, n_bl, n_nu, n_ff_r, n_ff_s = triage_url_failed(conn14)
         rows = {r["corporate_number"]: r for r in
                 conn14.execute("SELECT * FROM crawl_queue").fetchall()}
 
@@ -1018,13 +1031,21 @@ def run_tests():
         check("no_url → pending に戻り URL再検索",
               rows["F004"]["status"] == "pending" and rows["F004"]["hp_url"] is None,
               f"実際={rows['F004']['status']}, hp_url={rows['F004']['hp_url']}")
-        check("fetch_failed は triage 対象外（変更なし）",
-              rows["F005"]["status"] == "url_failed",
+        check("fetch_failed(attempts<3) → pending に戻りリトライ",
+              rows["F005"]["status"] == "pending",
               f"実際={rows['F005']['status']}")
+        check("fetch_failed(attempts>=3) → skip（繰り返し失敗で諦め）",
+              rows["F006"]["status"] == "skip",
+              f"実際={rows['F006']['status']}")
+        check("fetch_failed skip の error が fetch_failed_permanent になる",
+              rows["F006"]["error"] == "fetch_failed_permanent",
+              f"実際={rows['F006']['error']}")
         check("not_found 件数が 1 件", n_nf == 1, f"実際={n_nf}")
         check("bad_url 件数が 1 件", n_bu == 1, f"実際={n_bu}")
         check("blocked 件数が 1 件", n_bl == 1, f"実際={n_bl}")
         check("no_url 件数が 1 件", n_nu == 1, f"実際={n_nu}")
+        check("fetch_failed retry 件数が 1 件", n_ff_r == 1, f"実際={n_ff_r}")
+        check("fetch_failed skip 件数が 1 件", n_ff_s == 1, f"実際={n_ff_s}")
 
         conn14.close()
     finally:
