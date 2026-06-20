@@ -199,14 +199,26 @@ _BAD_CDN = frozenset([
     "yimg.jp", "fbcdn.net", "googleapis.com", "gstatic.com",
     "cloudfront.net", "akamaized.net", "fastly.net", "twimg.com",
 ])
+# スクレイプ対象外のスキーム
+_BAD_SCHEMES = frozenset(["data", "javascript", "mailto", "tel", "ftp"])
+# 開発用・内部向けポート（企業HPとして無効）
+_BAD_PORTS = frozenset(["8080", "8443", "3000", "3001", "4000", "5000", "8000", "8888", "9000"])
 
 def is_bad_url(url: str) -> bool:
-    """CDN・画像リソース・企業情報DB URLを検出"""
+    """CDN・画像リソース・非HTTPスキーム・開発ポート URLを検出"""
     try:
         p = urlparse(url)
+        # data: / javascript: など非HTTPスキーム
+        if p.scheme in _BAD_SCHEMES:
+            return True
+        # 開発用ポート
+        if p.port and str(p.port) in _BAD_PORTS:
+            return True
+        # 画像・静的リソース拡張子
         if os.path.splitext(p.path)[1].lower() in _BAD_EXT:
             return True
-        netloc = p.netloc
+        # CDN ドメイン
+        netloc = p.netloc.split(":")[0]  # ポートを除いてドメインのみ比較
         if any(netloc == d or netloc.endswith("." + d) for d in _BAD_CDN):
             return True
         return False
@@ -334,6 +346,15 @@ def run_tests():
         ("https://example.co.jp/doc.pdf", ".pdf 拡張子"),
         ("https://example.co.jp/style.css", ".css 拡張子"),
         ("https://d1234.cloudfront.net/asset.js", "cloudfront.net"),
+        # 非HTTPスキーム
+        ("data:image/png;base64,abc123",          "data: スキーム"),
+        ("javascript:void(0)",                     "javascript: スキーム"),
+        ("mailto:info@example.co.jp",              "mailto: スキーム"),
+        ("tel:03-1234-5678",                       "tel: スキーム"),
+        # 開発用ポート（企業HPとして無効）
+        ("https://example.co.jp:8080/",            "ポート 8080"),
+        ("https://example.co.jp:3000/",            "ポート 3000"),
+        ("https://example.co.jp:8888/dashboard",   "ポート 8888"),
     ]
     cdn_good = [
         ("https://example.co.jp/index.html", "普通のHTMLページ"),
