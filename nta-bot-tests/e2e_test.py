@@ -27,6 +27,7 @@ nta-bot E2E テスト
  23. ソフトエラーページ検出（HTTP 200 でも実質 404/403/503 なページを url_failed に振り分け）
  24. write_url_results 統合テスト（SKIP判定 + CDN除外 + normalize_url を組み合わせた書き込み）
  25. extract_page_info + is_soft_error_page 統合テスト（HTML → タイトル/本文抽出 → ソフトエラー判定）
+ 26. classify_title_quality（タイトル品質分類: no_title / too_short / numeric_only / ok）
 """
 
 import asyncio
@@ -432,6 +433,29 @@ def reset_stuck_watchdog(conn):
     ).rowcount
     conn.commit()
     return n_pending, n_url_found, n_error, n_skip, n_null_url
+
+
+# タイトル品質チェック用
+_NUMERIC_RE = re.compile(r"^\d+$")  # 数字のみのタイトル（法人番号DB の ID 等）
+
+
+def classify_title_quality(title: str | None) -> str:
+    """
+    スクレイプ結果のタイトル品質を分類する。
+    戻り値:
+    - "ok"           : 正常なタイトル（企業HP として有効）
+    - "no_title"     : タイトルなし（None または空文字）
+    - "too_short"    : 短すぎる（2文字未満）
+    - "numeric_only" : 数字のみ（法人番号DBのID、ページ番号等）
+    """
+    if not title or not title.strip():
+        return "no_title"
+    stripped = title.strip()
+    if len(stripped) < 2:
+        return "too_short"
+    if _NUMERIC_RE.match(stripped):
+        return "numeric_only"
+    return "ok"
 
 
 # HTML パース用（regex ベース・BeautifulSoup 不要）
@@ -1888,6 +1912,59 @@ def run_tests():
         check(f"  統合: {label}",
               result == expected_err,
               f"title={info['title']!r}, body_len={len(info['body_text'] or '')}, 期待={expected_err!r}, 実際={result!r}")
+
+    # ── テスト 26: タイトル品質分類（classify_title_quality）──
+    print("\n▼ Test 26: classify_title_quality（スクレイプ結果タイトルの品質分類）")
+
+    title_quality_cases = [
+        # (title, 期待分類, ラベル)
+        ("株式会社テスト",          "ok",           "正常タイトル"),
+        ("Toyota Motor Corporation","ok",           "英語タイトル"),
+        ("会社案内 | 株式会社ABC",  "ok",           "パイプ区切りタイトル"),
+        ("AB",                      "ok",           "2文字（最短有効）"),
+        (None,                      "no_title",     "None → no_title"),
+        ("",                        "no_title",     "空文字列 → no_title"),
+        ("   ",                     "no_title",     "空白のみ → no_title"),
+        ("A",                       "too_short",    "1文字 → too_short"),
+        ("あ",                      "too_short",    "日本語1文字 → too_short"),
+        ("1234567890123",           "numeric_only", "13桁法人番号 → numeric_only"),
+        ("12345",                   "numeric_only", "数字のみ5桁 → numeric_only"),
+        ("0",                       "too_short",    "1桁数字 → too_short（2文字未満優先）"),
+        ("404",                     "numeric_only", "404 数字のみ → numeric_only（soft error と区別）"),
+        ("123 ABC",                 "ok",           "数字+英字は numeric_only でない"),
+    ]
+    for title, expected, label in title_quality_cases:
+        result = classify_title_quality(title)
+        check(f"  {label}",
+              result == expected,
+              f"title={title!r}, 期待={expected!r}, 実際={result!r}")
+
+    # classify_title_quality + is_soft_error_page の組み合わせ判定
+    # スクレイプ後の総合判定: soft_error → url_failed、title_ng → 要確認（fetch_failed 扱い）
+    def judge_scrape_result(title, body_text):
+        """スクレイプ結果の総合品質判定"""
+        soft_err = is_soft_error_page(title, body_text)
+        if soft_err:
+            return soft_err
+        quality = classify_title_quality(title)
+        if quality != "ok":
+            return "fetch_failed"  # タイトル品質不良 → 再試行対象
+        return None  # 正常
+
+    combo_cases = [
+        # (title, body, 期待結果, ラベル)
+        ("404 Not Found",   "x" * 300, "not_found",   "ソフト404が優先"),
+        (None,              "x" * 300, "fetch_failed", "タイトルなし → fetch_failed"),
+        ("A",               "x" * 300, "fetch_failed", "短すぎタイトル → fetch_failed"),
+        ("9999999999999",   "x" * 300, "fetch_failed", "数字のみタイトル → fetch_failed"),
+        ("株式会社テスト", "x" * 300,  None,           "正常 → None"),
+        ("正常タイトル",   "x" * 10,   "fetch_failed", "本文短すぎ → fetch_failed"),
+    ]
+    for title, body, expected, label in combo_cases:
+        result = judge_scrape_result(title, body)
+        check(f"  総合判定: {label}",
+              result == expected,
+              f"期待={expected!r}, 実際={result!r}")
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
