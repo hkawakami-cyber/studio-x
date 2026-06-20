@@ -26,9 +26,11 @@ nta-bot E2E テスト
  22. ワイルドカード SKIP_DOMAINS マッチング（"google." 系）/ normalize_url 末尾スラッシュ正規化
  23. ソフトエラーページ検出（HTTP 200 でも実質 404/403/503 なページを url_failed に振り分け）
  24. write_url_results 統合テスト（SKIP判定 + CDN除外 + normalize_url を組み合わせた書き込み）
+ 25. extract_page_info + is_soft_error_page 統合テスト（HTML → タイトル/本文抽出 → ソフトエラー判定）
 """
 
 import asyncio
+import html as html_module
 import ipaddress
 import os
 import re
@@ -430,6 +432,39 @@ def reset_stuck_watchdog(conn):
     ).rowcount
     conn.commit()
     return n_pending, n_url_found, n_error, n_skip, n_null_url
+
+
+# HTML パース用（regex ベース・BeautifulSoup 不要）
+_TITLE_RE    = re.compile(r"<title[^>]*>(.*?)</title>",                     re.IGNORECASE | re.DOTALL)
+_OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']',
+                           re.IGNORECASE)
+_BODY_RE     = re.compile(r"<body[^>]*>(.*?)</body>",                       re.IGNORECASE | re.DOTALL)
+_TAG_RE      = re.compile(r"<[^>]+>")
+_WS_RE       = re.compile(r"\s+")
+
+
+def extract_page_info(html: str) -> dict:
+    """
+    HTML からページのタイトルと本文テキストを抽出する。
+    - タイトル: <title> タグ優先、なければ og:title、なければ None
+    - 本文テキスト: <body> 内のタグ除去・空白正規化後の文字列（最大 1000 文字）
+    """
+    title = None
+    m = _TITLE_RE.search(html)
+    if m:
+        title = html_module.unescape(_TAG_RE.sub("", m.group(1))).strip() or None
+    if not title:
+        m = _OG_TITLE_RE.search(html)
+        if m:
+            title = html_module.unescape(m.group(1)).strip() or None
+
+    body_html = ""
+    m = _BODY_RE.search(html)
+    body_html = m.group(1) if m else html
+    body_text = _WS_RE.sub(" ", _TAG_RE.sub(" ", body_html)).strip()
+    body_text = body_text[:1000] if body_text else None
+
+    return {"title": title, "body_text": body_text}
 
 
 def write_url_results_sim(conn, results):
@@ -1783,6 +1818,76 @@ def run_tests():
         for f in [tmp24, tmp24 + "-shm", tmp24 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
+
+    # ── テスト 25: extract_page_info + is_soft_error_page 統合テスト ──
+    print("\n▼ Test 25: extract_page_info + is_soft_error_page 統合テスト")
+
+    extract_cases = [
+        # (html, 期待title, ラベル)
+        ("<html><head><title>会社概要 | 株式会社テスト</title></head><body>本文</body></html>",
+         "会社概要 | 株式会社テスト",
+         "通常の title タグ"),
+        ("<html><head><title>  空白あり  </title></head><body></body></html>",
+         "空白あり",
+         "title の前後空白を strip"),
+        ("<html><head><title>テスト &amp; 会社</title></head><body></body></html>",
+         "テスト & 会社",
+         "HTML エンティティ (&amp;) をデコード"),
+        ("<html><head><meta property='og:title' content='OGPタイトル' /></head><body></body></html>",
+         "OGPタイトル",
+         "title なし → og:title フォールバック"),
+        ("<html><head><title>titleが優先</title>"
+         "<meta property='og:title' content='OGP は無視' /></head><body></body></html>",
+         "titleが優先",
+         "title と og:title 両方あり → title 優先"),
+        ("<html><body>タイトルなし</body></html>",
+         None,
+         "title なし・og:title なし → None"),
+    ]
+    for html_str, expected_title, label in extract_cases:
+        info = extract_page_info(html_str)
+        check(f"  extract_page_info: {label}",
+              info["title"] == expected_title,
+              f"期待={expected_title!r}, 実際={info['title']!r}")
+
+    # body_text 抽出テスト
+    html_with_body = (
+        "<html><head><title>T</title></head>"
+        "<body><h1>見出し</h1><p>段落テキスト。長い文章が続きます。</p></body></html>"
+    )
+    info_body = extract_page_info(html_with_body)
+    check("extract_page_info: body_text が抽出される",
+          info_body["body_text"] is not None and "段落テキスト" in info_body["body_text"],
+          f"実際={info_body['body_text']!r}")
+    check("extract_page_info: タグが除去される",
+          "<p>" not in (info_body["body_text"] or ""),
+          f"実際={info_body['body_text']!r}")
+
+    # extract_page_info + is_soft_error_page の統合テスト
+    integration_cases = [
+        # (html, 期待error, ラベル)
+        ("<html><head><title>404 Not Found</title></head><body>" + "x" * 300 + "</body></html>",
+         "not_found",
+         "404 タイトル → not_found"),
+        ("<html><head><title>403 Forbidden</title></head><body>" + "x" * 300 + "</body></html>",
+         "blocked",
+         "403 タイトル → blocked"),
+        ("<html><head><title>503 Service Unavailable</title></head><body>" + "x" * 300 + "</body></html>",
+         "fetch_failed",
+         "503 タイトル → fetch_failed"),
+        ("<html><head><title>株式会社テスト | 会社案内</title></head><body>" + "正常なコンテンツです。" * 30 + "</body></html>",
+         None,
+         "正常ページ → None（除外しない）"),
+        ("<html><head><title>テスト</title></head><body>短い</body></html>",
+         "fetch_failed",
+         "本文が _MIN_BODY_LEN 未満 → fetch_failed"),
+    ]
+    for html_str, expected_err, label in integration_cases:
+        info = extract_page_info(html_str)
+        result = is_soft_error_page(info["title"], info["body_text"])
+        check(f"  統合: {label}",
+              result == expected_err,
+              f"title={info['title']!r}, body_len={len(info['body_text'] or '')}, 期待={expected_err!r}, 実際={result!r}")
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
