@@ -20,6 +20,7 @@ nta-bot E2E テスト
 
 import asyncio
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -161,15 +162,30 @@ SKIP_DOMAINS = frozenset([
     "athome.co.jp", "mens-aso.co.jp",
 ])
 
+# URL パスに含まれる企業情報DB系のシグナルパターン
+# キーワードがパスセグメントの完全な単語として現れる場合のみマッチ（hojin-seal は除外）
+_BAD_PATH_PATTERNS = re.compile(
+    r"/(hojin|houjin|kaisha|corporate_number|company-info|biz-info|hojinbango)"
+    r"(?=[/?#]|$)"        # パスセグメントの末尾か次の区切り文字の手前
+    r"|[?&](corporate_number|hojin_id|company_id)=",
+    re.IGNORECASE,
+)
+
 def _is_valid_result_url(url: str, skip: frozenset) -> bool:
     """検索結果URLが有効な企業HPかチェック"""
     try:
-        netloc = urlparse(url).netloc
-        # NOTE: lstrip("www.") は文字集合扱いになるバグがある → removeprefix を使う
-        h = netloc.removeprefix("www.")
-        return bool(h) and not any(
-            h == d or h.endswith("." + d) for d in skip
-        )
+        p = urlparse(url)
+        h = p.netloc.removeprefix("www.")
+        if not h:
+            return False
+        # ドメインが SKIP_DOMAINS に含まれるか
+        if any(h == d or h.endswith("." + d) for d in skip):
+            return False
+        # パス・クエリに企業情報DB系シグナルが含まれるか
+        path_and_query = p.path + ("?" + p.query if p.query else "")
+        if _BAD_PATH_PATTERNS.search(path_and_query):
+            return False
+        return True
     except Exception:
         return False
 
@@ -994,6 +1010,32 @@ def run_tests():
         for f in [tmp14, tmp14 + "-shm", tmp14 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
+
+    # ── テスト 15: _is_valid_result_url パスシグナル検出 ───────
+    print("\n▼ Test 15: _is_valid_result_url パスシグナルによる不正URL除外")
+
+    path_bad_urls = [
+        ("https://example-db.co.jp/hojin/123456",         "/hojin/ パス"),
+        ("https://some-site.co.jp/houjin/details",        "/houjin/ パス"),
+        ("https://portal.co.jp/kaisha/list",              "/kaisha/ パス"),
+        ("https://lookup.co.jp/?corporate_number=1234",   "?corporate_number クエリ"),
+        ("https://search.co.jp/?hojin_id=5678",           "?hojin_id クエリ"),
+        ("https://unknown.co.jp/company-info/view",       "/company-info/ パス"),
+        ("https://db.co.jp/?company_id=9999",             "?company_id クエリ"),
+    ]
+    path_good_urls = [
+        ("https://www.toyota.co.jp/",                     "ルートURL"),
+        ("https://example.co.jp/about/company",           "/about/company（正常）"),
+        ("https://hojin-abc.co.jp/",                      "ドメインに hojin を含むが正常"),
+        ("https://example.co.jp/products/hojin-seal",     "パスに hojin を含むが別文脈"),
+    ]
+
+    for url, label in path_bad_urls:
+        check(f"  パスシグナル除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in path_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
