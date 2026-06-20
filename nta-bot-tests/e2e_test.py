@@ -25,6 +25,7 @@ nta-bot E2E テスト
  21. normalize_url クエリパラメータソート・SNS/ニュース/EC サイト SKIP_DOMAINS
  22. ワイルドカード SKIP_DOMAINS マッチング（"google." 系）/ normalize_url 末尾スラッシュ正規化
  23. ソフトエラーページ検出（HTTP 200 でも実質 404/403/503 なページを url_failed に振り分け）
+ 24. write_url_results 統合テスト（SKIP判定 + CDN除外 + normalize_url を組み合わせた書き込み）
 """
 
 import asyncio
@@ -429,6 +430,38 @@ def reset_stuck_watchdog(conn):
     ).rowcount
     conn.commit()
     return n_pending, n_url_found, n_error, n_skip, n_null_url
+
+
+def write_url_results_sim(conn, results):
+    """
+    write_url_results のシミュレーション（URLフェーズ結果書き込み）。
+    - 有効URL発見: url_searching → url_found（normalize_url 適用）
+    - 不正URL発見（SKIP_DOMAINS/CDN等）: url_searching → url_failed (bad_url)
+    - URL未発見: url_searching → url_failed (no_url)
+    """
+    for r in results:
+        url = r.get("hp_url")
+        cn = r["corporate_number"]
+        if url and _is_valid_result_url(url, SKIP_DOMAINS) and not is_bad_url(url):
+            norm = normalize_url(url) or url
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_found', hp_url=?, attempts=?, error=NULL "
+                "WHERE corporate_number=?",
+                (norm, r.get("attempts", 1), cn),
+            )
+        elif url:
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_failed', hp_url=NULL, "
+                "error='bad_url', attempts=0 WHERE corporate_number=?",
+                (cn,),
+            )
+        else:
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_failed', hp_url=NULL, "
+                "error='no_url', attempts=0 WHERE corporate_number=?",
+                (cn,),
+            )
+    conn.commit()
 
 
 def write_scrape_results_sim(conn, results):
@@ -1667,6 +1700,89 @@ def run_tests():
         result = is_soft_error_page(title, body)
         check(f"  {label}", result == expected,
               f"期待={expected!r}, 実際={result!r}")
+
+    # ── テスト 24: write_url_results（URLフェーズ結果書き込み統合テスト）──
+    print("\n▼ Test 24: write_url_results（URLフェーズ: SKIP判定 + normalize_url 統合）")
+
+    tmp24 = tempfile.mktemp(suffix=".db")
+    try:
+        conn24 = sqlite3.connect(tmp24)
+        conn24.row_factory = sqlite3.Row
+        conn24.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn24.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("G001", "正常URL企業",        "東", "千", "url_searching", 1, None, None, None),
+                ("G002", "不正ドメインURL企業", "東", "千", "url_searching", 1, None, None, None),
+                ("G003", "CDN URL企業",         "東", "千", "url_searching", 1, None, None, None),
+                ("G004", "URL未発見企業",       "東", "千", "url_searching", 2, None, None, None),
+                ("G005", "企業情報DBURL企業",   "東", "千", "url_searching", 1, None, None, None),
+                ("G006", "大文字URL企業",       "東", "千", "url_searching", 1, None, None, None),
+            ],
+        )
+        conn24.commit()
+
+        url_results = [
+            {"corporate_number": "G001", "hp_url": "https://example.co.jp/",           "attempts": 1},
+            {"corporate_number": "G002", "hp_url": "https://nabutan.com/hojin/123",     "attempts": 1},
+            {"corporate_number": "G003", "hp_url": "https://s.yimg.jp/icon.ico",        "attempts": 1},
+            {"corporate_number": "G004", "hp_url": None,                                "attempts": 2},
+            {"corporate_number": "G005", "hp_url": "https://www.freee.co.jp/co/123",    "attempts": 1},
+            # 大文字URL → normalize_url で正規化されて格納されるか
+            {"corporate_number": "G006", "hp_url": "HTTPS://Example.CO.JP",             "attempts": 1},
+        ]
+        write_url_results_sim(conn24, url_results)
+
+        rows = {r["corporate_number"]: r for r in
+                conn24.execute("SELECT * FROM crawl_queue").fetchall()}
+
+        check("正常URL → url_found に移動",
+              rows["G001"]["status"] == "url_found",
+              f"実際={rows['G001']['status']}")
+        check("正常URL → hp_url がセットされる",
+              rows["G001"]["hp_url"] == "https://example.co.jp/",
+              f"実際={rows['G001']['hp_url']}")
+        check("正常URL → attempts が保持される",
+              rows["G001"]["attempts"] == 1,
+              f"実際={rows['G001']['attempts']}")
+        check("不正ドメインURL(nabutan) → url_failed (bad_url)",
+              rows["G002"]["status"] == "url_failed" and rows["G002"]["error"] == "bad_url",
+              f"実際={rows['G002']['status']}, err={rows['G002']['error']}")
+        check("不正ドメインURL → hp_url が NULL クリアされる",
+              rows["G002"]["hp_url"] is None)
+        check("不正ドメインURL → attempts が 0 にリセットされる",
+              rows["G002"]["attempts"] == 0,
+              f"実際={rows['G002']['attempts']}")
+        check("CDN URL(.ico) → url_failed (bad_url)",
+              rows["G003"]["status"] == "url_failed" and rows["G003"]["error"] == "bad_url",
+              f"実際={rows['G003']['status']}, err={rows['G003']['error']}")
+        check("URL未発見 → url_failed (no_url)",
+              rows["G004"]["status"] == "url_failed" and rows["G004"]["error"] == "no_url",
+              f"実際={rows['G004']['status']}, err={rows['G004']['error']}")
+        check("URL未発見 → attempts が 0 にリセットされる",
+              rows["G004"]["attempts"] == 0)
+        check("企業情報DBURL(freee) → url_failed (bad_url)",
+              rows["G005"]["status"] == "url_failed" and rows["G005"]["error"] == "bad_url",
+              f"実際={rows['G005']['status']}, err={rows['G005']['error']}")
+        check("大文字URL → url_found に移動（normalize_url 適用）",
+              rows["G006"]["status"] == "url_found",
+              f"実際={rows['G006']['status']}")
+        check("大文字URL → normalize_url で小文字化・末尾スラッシュ付与",
+              rows["G006"]["hp_url"] == "https://example.co.jp/",
+              f"実際={rows['G006']['hp_url']}")
+
+        conn24.close()
+    finally:
+        for f in [tmp24, tmp24 + "-shm", tmp24 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
