@@ -21,6 +21,7 @@ nta-bot E2E テスト
  17. 求人・口コミサイト SKIP_DOMAINS フィルタ
  18. normalize_url None安全・is_bad_url 長URL・飲食店/予約サイト SKIP_DOMAINS
  19. is_bad_url IPアドレスURL・_is_valid_result_url スキーム検証・政府ポータル SKIP_DOMAINS
+ 20. normalize_url スキーム/ホスト小文字化・デフォルトポート除去・URLショートナー SKIP_DOMAINS
 """
 
 import asyncio
@@ -178,6 +179,9 @@ SKIP_DOMAINS = frozenset([
     # 政府・行政ポータル（企業自身のサイトではない）
     "nta.go.jp", "e-gov.go.jp", "mirasapo-plus.go.jp",
     "j-net21.smrj.go.jp", "hellowork.mhlw.go.jp",
+    # URLショートナー（最終的な企業HPではない）
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl",
+    "ow.ly", "short.io", "lnkd.in", "ift.tt", "buff.ly",
 ])
 
 # URL パスに含まれる企業情報DB系のシグナルパターン
@@ -268,10 +272,14 @@ _UTM_PARAMS = frozenset([
     "utm_id", "fbclid", "gclid", "msclkid", "yclid",
 ])
 
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
 def normalize_url(url: str | None) -> str | None:
     """
     URLを正規化して保存する。
     - None や空文字列は None を返す
+    - スキーム・ホストを小文字化
+    - デフォルトポート (:80/:443) 除去
     - フラグメント(#以降)除去
     - UTM/トラッキングパラメータ除去
     - クエリが空になったら ? ごと除去
@@ -283,6 +291,14 @@ def normalize_url(url: str | None) -> str | None:
         p = urlparse(url)
         if not p.scheme or not p.netloc:
             return None
+        scheme = p.scheme.lower()
+        # デフォルトポートを除去（example.co.jp:443 → example.co.jp）
+        host = p.hostname or ""
+        port = p.port
+        if port and str(port) == _DEFAULT_PORTS.get(scheme):
+            netloc = host.lower()
+        else:
+            netloc = p.netloc.lower()
         # クエリパラメータからトラッキング系を除去
         if p.query:
             pairs = [kv for kv in p.query.split("&")
@@ -291,7 +307,7 @@ def normalize_url(url: str | None) -> str | None:
         else:
             query = ""
         from urllib.parse import urlunparse
-        normalized = urlunparse((p.scheme, p.netloc, p.path, p.params, query, ""))
+        normalized = urlunparse((scheme, netloc, p.path, p.params, query, ""))
         return normalized or None
     except Exception:
         return None
@@ -1332,6 +1348,54 @@ def run_tests():
         check(f"  政府ポータル除外: {label}",
               not _is_valid_result_url(url, SKIP_DOMAINS))
     for url, label in gov_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 20: normalize_url 拡張 / URLショートナー SKIP_DOMAINS ──
+    print("\n▼ Test 20: normalize_url スキーム/ホスト小文字化・デフォルトポート除去・URLショートナー")
+
+    # スキーム・ホストの小文字化
+    norm20_cases = [
+        ("HTTPS://Example.CO.JP/About",
+         "https://example.co.jp/About",
+         "スキーム・ホスト小文字化（パスは保持）"),
+        ("HTTP://WWW.TOYOTA.CO.JP/",
+         "http://www.toyota.co.jp/",
+         "全大文字ホスト → 小文字"),
+        ("https://example.co.jp:443/page",
+         "https://example.co.jp/page",
+         "https デフォルトポート :443 除去"),
+        ("http://example.co.jp:80/",
+         "http://example.co.jp/",
+         "http デフォルトポート :80 除去"),
+        ("https://example.co.jp:8080/",
+         "https://example.co.jp:8080/",
+         "非デフォルトポートは保持"),
+    ]
+    for url, expected, label in norm20_cases:
+        result = normalize_url(url)
+        check(f"  {label}", result == expected,
+              f"期待={expected!r}, 実際={result!r}")
+
+    # URLショートナーは企業HPとして除外
+    short_bad_urls = [
+        ("https://bit.ly/3xyzABC",           "bit.ly"),
+        ("https://tinyurl.com/y1234abc",      "tinyurl.com"),
+        ("https://t.co/AbCdEfGh",             "t.co"),
+        ("https://goo.gl/maps/abcdef",        "goo.gl"),
+        ("https://ow.ly/xxxx50ABCDE",         "ow.ly"),
+        ("https://lnkd.in/eXXXXXX",          "lnkd.in"),
+        ("https://ift.tt/XXXXXXX",            "ift.tt"),
+        ("https://buff.ly/XXXXXXX",           "buff.ly"),
+    ]
+    short_good_urls = [
+        ("https://example.co.jp/",            "通常ドメイン"),
+        ("https://short-company.co.jp/",      "short を含むが独自ドメイン"),
+    ]
+    for url, label in short_bad_urls:
+        check(f"  URLショートナー除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in short_good_urls:
         check(f"  正常URL通過: {label}",
               _is_valid_result_url(url, SKIP_DOMAINS))
 
