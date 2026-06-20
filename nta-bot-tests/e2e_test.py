@@ -20,9 +20,11 @@ nta-bot E2E テスト
  16. normalize_url UTMパラメータ・フラグメント除去
  17. 求人・口コミサイト SKIP_DOMAINS フィルタ
  18. normalize_url None安全・is_bad_url 長URL・飲食店/予約サイト SKIP_DOMAINS
+ 19. is_bad_url IPアドレスURL・_is_valid_result_url スキーム検証・政府ポータル SKIP_DOMAINS
 """
 
 import asyncio
+import ipaddress
 import os
 import re
 import sqlite3
@@ -173,6 +175,9 @@ SKIP_DOMAINS = frozenset([
     "tabelog.com", "retty.me", "hotpepper.jp", "jalan.net",
     "tripadvisor.jp", "tripadvisor.com", "booking.com",
     "yelp.co.jp",
+    # 政府・行政ポータル（企業自身のサイトではない）
+    "nta.go.jp", "e-gov.go.jp", "mirasapo-plus.go.jp",
+    "j-net21.smrj.go.jp", "hellowork.mhlw.go.jp",
 ])
 
 # URL パスに含まれる企業情報DB系のシグナルパターン
@@ -184,13 +189,28 @@ _BAD_PATH_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_VALID_SCHEMES = frozenset(["http", "https"])
+
 def _is_valid_result_url(url: str, skip: frozenset) -> bool:
     """検索結果URLが有効な企業HPかチェック"""
     try:
         p = urlparse(url)
+        # http/https のみ許可
+        if p.scheme not in _VALID_SCHEMES:
+            return False
         h = p.netloc.removeprefix("www.")
         if not h:
             return False
+        # IPアドレスは企業HPとして無効（IPv4 と IPv6 [::1] 形式に対応）
+        if h.startswith("["):  # IPv6: [::1] or [::1]:port
+            host_only = h[1:h.index("]")] if "]" in h else h[1:]
+        else:
+            host_only = h.split(":")[0]
+        try:
+            ipaddress.ip_address(host_only)
+            return False  # IPアドレスだった
+        except ValueError:
+            pass  # ドメイン名（正常）
         # ドメインが SKIP_DOMAINS に含まれるか
         if any(h == d or h.endswith("." + d) for d in skip):
             return False
@@ -1261,6 +1281,58 @@ def run_tests():
               not _is_valid_result_url(url, SKIP_DOMAINS))
     for url, label in review_good_urls:
         check(f"  {label} は通過する",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 19: IPアドレスURL・スキーム検証・政府ポータル SKIP_DOMAINS ──
+    print("\n▼ Test 19: IPアドレスURL / スキーム検証 / 政府ポータル SKIP_DOMAINS")
+
+    # IPアドレスURLは企業HPとして無効
+    ip_bad_urls = [
+        ("http://192.168.1.1/",              "プライベートIP (IPv4)"),
+        ("http://10.0.0.1/index.html",       "プライベートIP 10.x"),
+        ("http://172.16.0.1/",               "プライベートIP 172.x"),
+        ("http://203.0.113.5/top.html",      "グローバルIP (テスト用)"),
+        ("https://[::1]/",                   "IPv6 ループバック"),
+    ]
+    ip_good_urls = [
+        ("https://example.co.jp/",           "正常ドメイン"),
+        ("https://192-168-1-1.example.jp/",  "IPアドレス風だがドメイン名"),
+    ]
+    for url, label in ip_bad_urls:
+        check(f"  IPアドレスURL除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in ip_good_urls:
+        check(f"  正常URL通過: {label}",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # 非http(s)スキームは企業HPとして無効
+    scheme_bad = [
+        ("ftp://example.co.jp/",             "ftp:// スキーム"),
+        ("file:///etc/passwd",               "file:// スキーム"),
+        ("ws://example.co.jp/",              "ws:// WebSocket"),
+        ("ssh://user@example.co.jp/",        "ssh:// スキーム"),
+    ]
+    for url, label in scheme_bad:
+        check(f"  非http(s)スキーム除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # 政府ポータルサイト SKIP_DOMAINS
+    gov_bad_urls = [
+        ("https://www.nta.go.jp/taxes/tetsuzuki/",         "nta.go.jp 国税庁"),
+        ("https://www.e-gov.go.jp/laws/",                  "e-gov.go.jp"),
+        ("https://mirasapo-plus.go.jp/hojin/123",          "mirasapo-plus.go.jp"),
+        ("https://j-net21.smrj.go.jp/startup/",            "j-net21.smrj.go.jp"),
+        ("https://hellowork.mhlw.go.jp/servicef/123",      "hellowork.mhlw.go.jp"),
+    ]
+    gov_good_urls = [
+        ("https://www.city.fujisawa.kanagawa.jp/soumu/",   "藤沢市（別ドメイン）"),
+        ("https://example-gov.co.jp/",                     "govを含むが民間企業"),
+    ]
+    for url, label in gov_bad_urls:
+        check(f"  政府ポータル除外: {label}",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in gov_good_urls:
+        check(f"  正常URL通過: {label}",
               _is_valid_result_url(url, SKIP_DOMAINS))
 
     # ── 結果サマリー ─────────────────────────────────────────
