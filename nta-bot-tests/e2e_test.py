@@ -31,6 +31,7 @@ nta-bot E2E テスト
  27. check_db_consistency（DB整合性チェック + watchdog 適用後の問題解消確認）
  28. fetch_url_batch / fetch_scrape_batch（attempts 上限・バッチサイズ制御テスト）
  29. write_full_scrape_result（crawl_queue + corporations 統合書き込み・テーブル間整合確認）
+ 30. detect_duplicate_urls / reset_duplicate_urls（ポータルURL検出・同一URLが多数企業に割り当たる場合を検出）
 """
 
 import asyncio
@@ -559,6 +560,45 @@ def fetch_scrape_batch_sim(conn, batch_size: int = 10, max_attempts: int = 3) ->
     ).rowcount
     conn.commit()
     return n
+
+
+def detect_duplicate_urls(conn, threshold: int = 5) -> list:
+    """
+    同じ hp_url が threshold 件以上の企業に割り当てられているURLを検出する。
+    企業一覧ページや検索結果ポータルの可能性が高いURLを特定する。
+    戻り値: [(hp_url, count), ...] のリスト（count 降順）
+    """
+    rows = conn.execute(
+        "SELECT hp_url, COUNT(*) as cnt FROM crawl_queue "
+        "WHERE status IN ('done','url_found') AND hp_url IS NOT NULL "
+        "GROUP BY hp_url HAVING cnt >= ? ORDER BY cnt DESC",
+        (threshold,),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def reset_duplicate_urls(conn, threshold: int = 5) -> tuple:
+    """
+    重複URLを持つレコードを pending に戻して hp_url をクリア（URL再検索）。
+    戻り値: (crawl_queue リセット件数, corporations クリア件数)
+    """
+    duplicate_urls = [url for url, _ in detect_duplicate_urls(conn, threshold)]
+    if not duplicate_urls:
+        return 0, 0
+    n_queue = n_corps = 0
+    for url in duplicate_urls:
+        n_queue += conn.execute(
+            "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+            "WHERE hp_url=? AND status IN ('done','url_found')",
+            (url,),
+        ).rowcount
+        n_corps += conn.execute(
+            "UPDATE corporations SET hp_url=NULL, hp_title=NULL, hp_scraped_at=NULL "
+            "WHERE hp_url=?",
+            (url,),
+        ).rowcount
+    conn.commit()
+    return n_queue, n_corps
 
 
 def write_full_scrape_result_sim(conn, results):
@@ -2368,6 +2408,97 @@ def run_tests():
         conn29.close()
     finally:
         for f in [tmp29, tmp29 + "-shm", tmp29 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 30: URL重複検出 + reset_duplicate_urls ──────
+    print("\n▼ Test 30: detect_duplicate_urls / reset_duplicate_urls（ポータルURL検出）")
+
+    tmp30 = tempfile.mktemp(suffix=".db")
+    try:
+        conn30 = sqlite3.connect(tmp30)
+        conn30.row_factory = sqlite3.Row
+        conn30.executescript("""
+            CREATE TABLE corporations (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, kind TEXT,
+                hp_url TEXT, hp_title TEXT, hp_scraped_at TEXT
+            );
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        PORTAL_URL  = "https://portal-list.co.jp/"          # 10社 → 閾値5以上
+        SHARED_URL  = "https://shared-three.co.jp/"         # 3社 → 閾値5未満
+        UNIQUE_URL  = "https://unique-company.co.jp/"       # 1社 → 正常
+        scraped_at  = "2026-06-20T00:00:00+00:00"
+
+        corps_data, queue_data = [], []
+        for i in range(10):
+            cn = f"J{i:03d}"
+            corps_data.append((cn, f"ポータル企業{i}", "2015", PORTAL_URL, "ポータル", scraped_at))
+            queue_data.append((cn, f"ポータル企業{i}", "東", "千", "done", 3, PORTAL_URL, None, None))
+        for i in range(3):
+            cn = f"K{i:03d}"
+            corps_data.append((cn, f"共有企業{i}", "2015", SHARED_URL, "共有", scraped_at))
+            queue_data.append((cn, f"共有企業{i}", "東", "千", "done", 3, SHARED_URL, None, None))
+        corps_data.append(("L001", "ユニーク企業", "2015", UNIQUE_URL, "ユニーク", scraped_at))
+        queue_data.append(("L001", "ユニーク企業", "東", "千", "done", 3, UNIQUE_URL, None, None))
+
+        conn30.executemany("INSERT INTO corporations VALUES (?,?,?,?,?,?)", corps_data)
+        conn30.executemany("INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)", queue_data)
+        conn30.commit()
+
+        # ① 重複検出（閾値5）
+        dups = detect_duplicate_urls(conn30, threshold=5)
+        check("重複検出: PORTAL_URL（10社）が検出される",
+              any(url == PORTAL_URL for url, _ in dups),
+              f"実際={dups}")
+        check("重複検出: SHARED_URL（3社）は閾値5未満で検出されない",
+              not any(url == SHARED_URL for url, _ in dups),
+              f"実際={dups}")
+        check("重複検出: UNIQUE_URL（1社）は検出されない",
+              not any(url == UNIQUE_URL for url, _ in dups))
+        check("重複検出: 検出件数が 1 件",
+              len(dups) == 1, f"実際={len(dups)}")
+
+        # ② リセット実行（閾値5）
+        n_q, n_c = reset_duplicate_urls(conn30, threshold=5)
+        check("リセット: crawl_queue が 10 件 pending に戻る",
+              n_q == 10, f"実際={n_q}")
+        check("リセット: corporations が 10 件 NULL クリアされる",
+              n_c == 10, f"実際={n_c}")
+
+        # ③ リセット後の状態確認
+        portal_pending = conn30.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE hp_url IS NULL AND status='pending'"
+        ).fetchone()[0]
+        check("リセット後: ポータルURLの 10 件が pending に移行",
+              portal_pending == 10, f"実際={portal_pending}")
+        shared_done = conn30.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE hp_url=? AND status='done'",
+            (SHARED_URL,),
+        ).fetchone()[0]
+        check("リセット後: SHARED_URL の 3 件は done のまま（閾値未満）",
+              shared_done == 3, f"実際={shared_done}")
+        unique_done = conn30.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE hp_url=? AND status='done'",
+            (UNIQUE_URL,),
+        ).fetchone()[0]
+        check("リセット後: UNIQUE_URL の 1 件は done のまま",
+              unique_done == 1, f"実際={unique_done}")
+        portal_corp_null = conn30.execute(
+            "SELECT COUNT(*) FROM corporations WHERE hp_url IS NULL"
+        ).fetchone()[0]
+        check("リセット後: corporations の PORTAL_URL 10 件が NULL クリア",
+              portal_corp_null == 10, f"実際={portal_corp_null}")
+
+        conn30.close()
+    finally:
+        for f in [tmp30, tmp30 + "-shm", tmp30 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
