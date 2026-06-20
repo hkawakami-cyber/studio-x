@@ -14,7 +14,6 @@
 出力カラム:
   corporate_number  法人番号（突合キー）
   name              企業名
-  kind              法人種別
   pref_name         都道府県
   city_name         市区町村
   hp_url            確定HP URL (corporations テーブル優先、なければ crawl_queue)
@@ -23,6 +22,8 @@
   crawl_status      クロールステータス (done/skip/error/url_failed/pending 等)
   crawl_error       エラー種別
   crawl_attempts    試行回数
+
+注意: corporations.kind は NTA CSV インポート時のカラムずれにより日付値が入っているため除外。
 """
 
 import argparse
@@ -36,7 +37,6 @@ DEFAULT_OUT_DIR = Path.home() / "Downloads"
 COLUMNS = [
     "corporate_number",
     "name",
-    "kind",
     "pref_name",
     "city_name",
     "hp_url",
@@ -51,7 +51,6 @@ QUERY = """
 SELECT
     q.corporate_number,
     q.name,
-    c.kind,
     q.pref_name,
     q.city_name,
     COALESCE(c.hp_url, q.hp_url)  AS hp_url,
