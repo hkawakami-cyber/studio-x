@@ -13,6 +13,11 @@ Mac上の enricher.py と watchdog.py に累積的な改善を適用するパッ
   E04  _VALID_SCHEMES / IP除外: _is_valid_result_url 強化
   E05  normalize_url: None安全・小文字化・デフォルトポート除去・UTM除去
   E06  write_scrape_results: no_url → url_failed 追加
+  E07  _is_skip_domain: ワイルドカード対応スキップドメインチェック
+  E08  normalize_url: 末尾スラッシュ正規化 (p.path or "/")
+  E09  is_soft_error_page: HTTP 200 実質エラーページ検出
+  E10  classify_title_quality: タイトル品質分類
+  E11  extract_page_info: HTMLからタイトル・本文を抽出
   W01  reset_stuck: url_found(hp_url=NULL) → url_failed 追加
 """
 
@@ -436,6 +441,238 @@ def patch_e06_no_url_url_failed(path: Path):
     fail(name, "write_scrape_results の bad_url パターンが見つかりません")
 
 
+def patch_e07_is_skip_domain(path: Path):
+    """E07 _is_skip_domain: ワイルドカード対応スキップドメインチェック"""
+    name = "E07 _is_skip_domain ワイルドカード対応"
+    text = path.read_text(encoding="utf-8")
+    if "_is_skip_domain" in text:
+        skip(name)
+        return
+
+    helper = '''
+
+def _is_skip_domain(h: str, skip_set: frozenset) -> bool:
+    for d in skip_set:
+        if d.endswith("."):
+            d_base = d[:-1]
+            if h == d_base or h.startswith(d_base + "."):
+                return True
+        else:
+            if h == d or h.endswith("." + d):
+                return True
+    return False
+
+'''
+
+    anchor = "\nSKIP_DOMAINS = frozenset"
+    if anchor not in text:
+        fail(name, "SKIP_DOMAINS が見つかりません")
+        return
+    skip_start = text.find(anchor)
+    skip_end = text.find("\n])", skip_start)
+    if skip_end == -1:
+        fail(name, "SKIP_DOMAINS ブロックの終端が見つかりません")
+        return
+    insert_at = skip_end + 3
+    text = text[:insert_at] + helper + text[insert_at:]
+
+    # _is_valid_result_url 内のスキップドメインチェックを更新
+    for old_check in [
+        'if any(h.endswith("." + d) or h == d for d in SKIP_DOMAINS):',
+        'if any(h == d or h.endswith("." + d) for d in SKIP_DOMAINS):',
+        'if any(h == d or h.endswith("."+d) for d in SKIP_DOMAINS):',
+        "if any(h.endswith('.' + d) or h == d for d in SKIP_DOMAINS):",
+        "if any(h == d or h.endswith('.' + d) for d in SKIP_DOMAINS):",
+    ]:
+        if old_check in text:
+            text = text.replace(old_check, "if _is_skip_domain(h, SKIP_DOMAINS):", 1)
+            break
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        orig = path.read_text(encoding="utf-8")
+        path.write_text(orig.replace(helper, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e08_trailing_slash(path: Path):
+    """E08 normalize_url: 末尾スラッシュ正規化"""
+    name = "E08 normalize_url 末尾スラッシュ正規化"
+    text = path.read_text(encoding="utf-8")
+    if 'p.path or "/"' in text or "p.path or '/'" in text:
+        skip(name)
+        return
+    if "normalize_url" not in text:
+        fail(name, "normalize_url 未検出 (E05 を先に適用してください)")
+        return
+
+    old = 'return urlunparse((scheme, netloc, p.path, p.params, query, "")) or None'
+    new = 'return urlunparse((scheme, netloc, p.path or "/", p.params, query, "")) or None'
+    if old not in text:
+        old = "return urlunparse((scheme, netloc, p.path, p.params, query, ''))"
+        new = "return urlunparse((scheme, netloc, p.path or '/', p.params, query, ''))"
+    if old not in text:
+        fail(name, "normalize_url の return パターンが見つかりません")
+        return
+
+    text = text.replace(old, new, 1)
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(new, old, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e09_soft_error_page(path: Path):
+    """E09 is_soft_error_page: HTTP 200 実質エラーページ検出"""
+    name = "E09 is_soft_error_page 追加"
+    text = path.read_text(encoding="utf-8")
+    if "is_soft_error_page" in text or "_BAD_TITLE_PATTERNS" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    func_code = re_import + '''
+_BAD_TITLE_PATTERNS = re.compile(
+    r"\\b(?:404|not found|page not found|403|forbidden|access denied"
+    r"|500|internal server error|503|service unavailable)\\b"
+    r"|ページが見つかりません|お探しのページ|アクセスできません|アクセス拒否"
+    r"|メンテナンス中|サーバーエラー",
+    re.IGNORECASE,
+)
+_MIN_BODY_LEN = 200
+
+
+def is_soft_error_page(title, body_text):
+    if title and _BAD_TITLE_PATTERNS.search(title):
+        tl = title.lower()
+        if ("404" in tl or "not found" in tl
+                or "見つかりません" in title
+                or "お探しのページ" in title):
+            return "not_found"
+        if ("403" in tl or "forbidden" in tl or "access denied" in tl
+                or "アクセスできません" in title
+                or "アクセス拒否" in title):
+            return "blocked"
+        return "fetch_failed"
+    if body_text is not None and len(body_text.strip()) < _MIN_BODY_LEN:
+        return "fetch_failed"
+    return None
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e10_classify_title_quality(path: Path):
+    """E10 classify_title_quality: タイトル品質分類"""
+    name = "E10 classify_title_quality 追加"
+    text = path.read_text(encoding="utf-8")
+    if "classify_title_quality" in text or "_NUMERIC_RE" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    func_code = re_import + '''
+_NUMERIC_RE = re.compile(r"^\\d+$")
+
+
+def classify_title_quality(title):
+    if not title or not title.strip():
+        return "no_title"
+    stripped = title.strip()
+    if len(stripped) < 2:
+        return "too_short"
+    if _NUMERIC_RE.match(stripped):
+        return "numeric_only"
+    return "ok"
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e11_extract_page_info(path: Path):
+    """E11 extract_page_info: HTMLからタイトル・本文を抽出"""
+    name = "E11 extract_page_info 追加"
+    text = path.read_text(encoding="utf-8")
+    if "extract_page_info" in text or "_TITLE_RE" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    has_html_mod = ("import html as _html_mod" in text)
+    html_import = "" if has_html_mod else "import html as _html_mod\n"
+    func_code = re_import + html_import + '''
+_TITLE_RE    = re.compile(r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
+_OG_TITLE_RE = re.compile(r'<meta[^>]+property="og:title"[^>]+content="(.*?)"', re.IGNORECASE)
+_BODY_RE     = re.compile(r'<body[^>]*>(.*?)</body>', re.IGNORECASE | re.DOTALL)
+_TAG_RE      = re.compile(r'<[^>]+>')
+_WS_RE       = re.compile(r'\\s+')
+
+
+def extract_page_info(html: str) -> dict:
+    title = None
+    m = _TITLE_RE.search(html)
+    if m:
+        title = _html_mod.unescape(_TAG_RE.sub("", m.group(1))).strip() or None
+    if not title:
+        m = _OG_TITLE_RE.search(html)
+        if m:
+            title = _html_mod.unescape(m.group(1)).strip() or None
+    m = _BODY_RE.search(html)
+    body_html = m.group(1) if m else html
+    body_text = _WS_RE.sub(" ", _TAG_RE.sub(" ", body_html)).strip()
+    body_text = body_text[:1000] if body_text else None
+    return {"title": title, "body_text": body_text}
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
 # ═══════════════════════════════════════════════════════════
 #  watchdog.py パッチ
 # ═══════════════════════════════════════════════════════════
@@ -524,6 +761,11 @@ def main():
     patch_e04_valid_scheme_ip(ENRICHER)
     patch_e05_normalize_url(ENRICHER)
     patch_e06_no_url_url_failed(ENRICHER)
+    patch_e07_is_skip_domain(ENRICHER)
+    patch_e08_trailing_slash(ENRICHER)
+    patch_e09_soft_error_page(ENRICHER)
+    patch_e10_classify_title_quality(ENRICHER)
+    patch_e11_extract_page_info(ENRICHER)
 
     # ── watchdog.py ──────────────────────────────────────────
     print("\n▼ watchdog.py")
