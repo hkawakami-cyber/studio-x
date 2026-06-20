@@ -595,6 +595,147 @@ def run_tests():
             if os.path.exists(f):
                 os.unlink(f)
 
+    # ── テスト 8: lstrip("www.") バグ vs removeprefix("www.") ──
+    print("\n▼ Test 8: lstrip バグ vs removeprefix の差異確認")
+
+    def bad_is_valid(url: str, skip: frozenset) -> bool:
+        """lstrip バグ版（修正前）"""
+        try:
+            netloc = urlparse(url).netloc
+            h = netloc.lstrip("www.")  # バグ: 文字集合扱いで先頭 w/. を全部除去
+            return bool(h) and not any(
+                h == d or h.endswith("." + d) for d in skip
+            )
+        except Exception:
+            return False
+
+    def good_is_valid(url: str, skip: frozenset) -> bool:
+        """removeprefix 修正版"""
+        try:
+            netloc = urlparse(url).netloc
+            h = netloc.removeprefix("www.")
+            return bool(h) and not any(
+                h == d or h.endswith("." + d) for d in skip
+            )
+        except Exception:
+            return False
+
+    # weblio.jp は "www.weblio.jp" → lstrip("www.") で "eblio.jp" になりフィルタ抜け
+    weblio_www = "https://www.weblio.jp/content/test"
+    weblio_nowww = "https://weblio.jp/content/test"
+    # lstrip は文字集合扱い: "www.weblio.jp" → "eblio.jp"、"weblio.jp" → "eblio.jp"
+    check("lstrip バグ: www.weblio.jp がフィルタをすり抜ける",
+          bad_is_valid(weblio_www, SKIP_DOMAINS))
+    check("lstrip バグ: weblio.jp (www.なし) もフィルタをすり抜ける（先頭'w'も除去）",
+          bad_is_valid(weblio_nowww, SKIP_DOMAINS))
+    check("removeprefix 修正: www.weblio.jp が正しく除外される",
+          not good_is_valid(weblio_www, SKIP_DOMAINS))
+    check("removeprefix 修正: weblio.jp (www.なし) も正しく除外される",
+          not good_is_valid(weblio_nowww, SKIP_DOMAINS))
+
+    # 正常ドメインには影響なし（"www." で始まらないドメイン）
+    normal_url = "https://www.toyota.co.jp/index.html"
+    check("removeprefix: 正常ドメインは通過する", good_is_valid(normal_url, SKIP_DOMAINS))
+
+    # ── テスト 9: scrape_worker の hp_url=NULL 早期 return ───
+    print("\n▼ Test 9: scrape_worker hp_url=NULL 早期 return ロジック")
+
+    def simulate_scrape_worker(hp_url, html, status_code):
+        """scrape_worker の hp_url=NULL チェックロジック再現"""
+        if hp_url is None:
+            return "skipped_null_hp_url", None
+        if html is None:
+            if status_code == 404:
+                error = "not_found"
+            elif status_code == 403:
+                error = "blocked"
+            else:
+                error = "fetch_failed"
+            return "url_failed", error
+        return "done", None
+
+    result, _ = simulate_scrape_worker(None, None, 0)
+    check("hp_url=NULL → 早期 return（スクレイプ試みない）",
+          result == "skipped_null_hp_url")
+    result, err = simulate_scrape_worker("https://example.co.jp", None, 404)
+    check("hp_url あり・404 → url_failed (not_found)",
+          result == "url_failed" and err == "not_found")
+    result, err = simulate_scrape_worker("https://example.co.jp", "<html>ok</html>", 200)
+    check("hp_url あり・html あり → done", result == "done")
+
+    # ── テスト 10: RETRY_AT トリガー（pending < 300,000 で url_failed を retry）──
+    print("\n▼ Test 10: url_failed 自動 retry トリガー (RETRY_AT)")
+
+    RETRY_AT = 300_000
+
+    def should_retry_url_failed(pending_count: int, retry_count: int, max_retries: int = 5) -> bool:
+        return pending_count < RETRY_AT and retry_count < max_retries
+
+    check("pending=2,320,484 → retry しない",
+          not should_retry_url_failed(2_320_484, 0))
+    check("pending=250,000 → retry する（初回）",
+          should_retry_url_failed(250_000, 0))
+    check("pending=250,000・retry_count=5 → retry しない（上限）",
+          not should_retry_url_failed(250_000, 5))
+    check("pending=299,999 → retry する（境界値）",
+          should_retry_url_failed(299_999, 4))
+    check("pending=300,000 → retry しない（境界値）",
+          not should_retry_url_failed(300_000, 0))
+
+    # ── テスト 11: url_found スタック防止（attempts 上限リセット）─
+    print("\n▼ Test 11: url_found スタック防止 attempts リセット")
+
+    tmp11 = tempfile.mktemp(suffix=".db")
+    try:
+        conn11 = sqlite3.connect(tmp11)
+        conn11.row_factory = sqlite3.Row
+        conn11.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn11.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("C001", "3回試行済み", "東", "千", "url_found", 3,
+                 "https://a.co.jp", None, None),
+                ("C002", "2回試行済み", "東", "千", "url_found", 2,
+                 "https://b.co.jp", None, None),
+                ("C003", "1回試行済み", "東", "千", "url_found", 1,
+                 "https://c.co.jp", None, None),
+            ],
+        )
+        conn11.commit()
+
+        # watchdog の url_found スタック防止: attempts>=3 を attempts=1 にリセット
+        n_reset = conn11.execute(
+            "UPDATE crawl_queue SET attempts=1 WHERE status='url_found' AND attempts>=3"
+        ).rowcount
+        conn11.commit()
+
+        after = conn11.execute(
+            "SELECT corporate_number, attempts FROM crawl_queue ORDER BY corporate_number"
+        ).fetchall()
+        attempts_map = {r["corporate_number"]: r["attempts"] for r in after}
+
+        check("attempts>=3 の url_found が attempts=1 にリセットされる",
+              n_reset == 1, f"件数={n_reset}")
+        check("C001: attempts 3→1 にリセット", attempts_map["C001"] == 1,
+              f"実際={attempts_map['C001']}")
+        check("C002: attempts=2 は変更されない", attempts_map["C002"] == 2,
+              f"実際={attempts_map['C002']}")
+        check("C003: attempts=1 は変更されない", attempts_map["C003"] == 1,
+              f"実際={attempts_map['C003']}")
+
+        conn11.close()
+    finally:
+        for f in [tmp11, tmp11 + "-shm", tmp11 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
     total = len(PASSED) + len(FAILED)
