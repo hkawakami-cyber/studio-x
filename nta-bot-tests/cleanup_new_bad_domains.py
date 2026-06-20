@@ -17,16 +17,16 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path.home() / "Downloads" / "nta-bot" / "db" / "nta.db"
+DB_PATH = Path.home() / "Downloads" / "houjin.db"
 
-# スクリーニング（2026-06-20）で発見した不良ドメイン
-# 推定クリーンアップ件数 ~48万件
+# スクリーニングで発見した不良ドメイン
+# 推定クリーンアップ件数 ~60万件
 NEW_BAD_DOMAINS = [
+    # ── 企業情報・法人情報DB（企業の公式HP ではない）──────────────
     "yayoi-kk.co.jp",              # 78K: 弥生会計サービス
     "nabutan.com",                  # 64K: 企業情報DB
+    "kotobasta.com",                # 51K: 企業情報DB
     "companydata.tsujigawa.com",    # 47K: 企業情報DB
-    "navitime.co.jp",               # 44K: 地図サービス
-    "kanji.jitenon.jp",             # 42K: 漢字辞典
     "kaisharesearch.com",           # 32K: 企業情報DB
     "houjin.info",                  # 法人情報DB
     "houjin.jp",                    # 法人情報DB
@@ -39,18 +39,36 @@ NEW_BAD_DOMAINS = [
     "alarmbox.jp",                  # 企業情報DB
     "web.suke-dachi.jp",            # 企業情報DB
     "toukibo.ai-con.lawyer",        # 登記情報DB（21K）
+    "for-spring.com",               # 8K: 企業情報DB
+    "suzubera.com",                 # 3K: 企業情報DB
+    # ── 地図・辞書・名字サービス ──────────────────────────────────
+    "navitime.co.jp",               # 44K: 地図サービス
+    "kanji.jitenon.jp",             # 42K: 漢字辞典
     "weblio.jp",                    # 辞書サービス（26K）
     "ejje.weblio.jp",               # 辞書サービス
     "myoji-yurai.net",              # 名字由来サービス
+    # ── 行政・公共機関 ────────────────────────────────────────────
     "mhlw.go.jp",                   # 厚労省（16K）
-    # 市区町村公式サイト（企業HP ではない）
-    "city.minato.tokyo.jp",
-    "city.yokohama.lg.jp",
-    "city.sapporo.jp",
-    # 外国サイト・汎用サービス
+    "city.minato.tokyo.jp",         # 港区
+    "city.yokohama.lg.jp",          # 横浜市
+    "city.sapporo.jp",              # 札幌市
+    # ── テック系汎用サービス（企業HP ではない）───────────────────
+    "github.com",                   # 3K: コードホスティング
+    "stackoverflow.com",            # 3K: Q&A
+    "apps.apple.com",               # 4K: App Store
+    "office.com",                   # Microsoft（8K）
+    "ht-tax.or.jp",                 # 4K: 税理士サポートサイト（同一URL大量流用）
+    "origamijapan.net",             # 3K: 折り紙関連ポータル（同一URL大量流用）
+    # ── SNS（既存 SKIP_DOMAINS の補完）──────────────────────────
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "instagram.com",
+    "ameblo.jp",
+    "note.com",
+    # ── 外国・汎用サービス ────────────────────────────────────────
     "reddit.com",                   # 16K
     "zhihu.com",
-    "office.com",                   # Microsoft（8K）
     "athome.co.jp",                 # 不動産
     "mens-aso.co.jp",               # アパレル
 ]
