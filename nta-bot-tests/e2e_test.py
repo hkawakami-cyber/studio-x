@@ -16,6 +16,10 @@ nta-bot E2E テスト
  12. watchdog url_found(hp_url=NULL) → url_failed 自動移動
  13. write_scrape_results no_url → url_failed
  14. url_failed エラー分類別再試行戦略（fetch_failed の attempts 分岐含む）
+ 15. _is_valid_result_url パスシグナル検出
+ 16. normalize_url UTMパラメータ・フラグメント除去
+ 17. 求人・口コミサイト SKIP_DOMAINS フィルタ
+ 18. normalize_url None安全・is_bad_url 長URL・飲食店/予約サイト SKIP_DOMAINS
 """
 
 import asyncio
@@ -165,6 +169,10 @@ SKIP_DOMAINS = frozenset([
     "en-japan.com", "type.jp", "hatarako.net", "job-gear.jp",
     # 口コミ・評判サイト
     "glassdoor.com", "vorkers.com", "openwork.jp",
+    # 飲食店・観光レビュー・予約サイト（企業HPではなくポータル）
+    "tabelog.com", "retty.me", "hotpepper.jp", "jalan.net",
+    "tripadvisor.jp", "tripadvisor.com", "booking.com",
+    "yelp.co.jp",
 ])
 
 # URL パスに含まれる企業情報DB系のシグナルパターン
@@ -195,6 +203,8 @@ def _is_valid_result_url(url: str, skip: frozenset) -> bool:
         return False
 
 
+_MAX_URL_LEN = 500  # これ以上長いURLは追跡/リダイレクト用であることが多い
+
 _BAD_EXT = frozenset([
     ".ico", ".gif", ".png", ".jpg", ".jpeg", ".webp",
     ".css", ".js", ".pdf", ".xml", ".txt", ".zip",
@@ -210,7 +220,9 @@ _BAD_SCHEMES = frozenset(["data", "javascript", "mailto", "tel", "ftp"])
 _BAD_PORTS = frozenset(["8080", "8443", "3000", "3001", "4000", "5000", "8000", "8888", "9000"])
 
 def is_bad_url(url: str) -> bool:
-    """CDN・画像リソース・非HTTPスキーム・開発ポート URLを検出"""
+    """CDN・画像リソース・非HTTPスキーム・開発ポート・超長URLを検出"""
+    if not url or len(url) > _MAX_URL_LEN:
+        return True
     try:
         p = urlparse(url)
         # data: / javascript: など非HTTPスキーム
@@ -236,14 +248,17 @@ _UTM_PARAMS = frozenset([
     "utm_id", "fbclid", "gclid", "msclkid", "yclid",
 ])
 
-def normalize_url(url: str) -> str | None:
+def normalize_url(url: str | None) -> str | None:
     """
     URLを正規化して保存する。
+    - None や空文字列は None を返す
     - フラグメント(#以降)除去
     - UTM/トラッキングパラメータ除去
     - クエリが空になったら ? ごと除去
     - 正規化できない場合は None を返す
     """
+    if not url:
+        return None
     try:
         p = urlparse(url)
         if not p.scheme or not p.netloc:
@@ -1171,8 +1186,7 @@ def run_tests():
 
     for url, expected, label in norm_inputs_expected:
         if url is None:
-            result = normalize_url("") if url is None else normalize_url(url)
-            # None入力は None 返す
+            result = normalize_url(url)
             check(f"  {label}", result is None, f"結果={result}")
         else:
             result = normalize_url(url)
@@ -1204,6 +1218,48 @@ def run_tests():
         check(f"  {label} が除外される",
               not _is_valid_result_url(url, SKIP_DOMAINS))
     for url, label in job_good_urls:
+        check(f"  {label} は通過する",
+              _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 18: normalize_url None安全・is_bad_url 長URL・飲食店/予約サイト ──
+    print("\n▼ Test 18: normalize_url None安全 / is_bad_url 長URL / 飲食店系 SKIP_DOMAINS")
+
+    # normalize_url: None/空文字安全
+    check("normalize_url(None) → None", normalize_url(None) is None)
+    check("normalize_url('') → None", normalize_url("") is None)
+    check("normalize_url 正常URL → 変更なし",
+          normalize_url("https://example.co.jp/") == "https://example.co.jp/")
+
+    # is_bad_url: 長すぎるURL（追跡/リダイレクト系）
+    long_url = "https://redirect.example.com/" + "a" * 480  # 509文字
+    short_url = "https://example.co.jp/" + "a" * 10        # 32文字
+    check(f"is_bad_url: {_MAX_URL_LEN}文字超URL → bad_url",
+          is_bad_url(long_url), f"len={len(long_url)}")
+    check("is_bad_url: 短いURL → 正常",
+          not is_bad_url(short_url), f"len={len(short_url)}")
+    check("is_bad_url: None → bad_url", is_bad_url(None))
+    check("is_bad_url: 空文字列 → bad_url", is_bad_url(""))
+
+    # 飲食店・予約サイト SKIP_DOMAINS
+    review_bad_urls = [
+        ("https://tabelog.com/tokyo/A1301/A130101/13001234/", "tabelog.com 食べログ"),
+        ("https://retty.me/area/PRE13/ARE1/SUB2/100012345/", "retty.me"),
+        ("https://hotpepper.jp/str/RK001234/",               "hotpepper.jp ホットペッパー"),
+        ("https://www.jalan.net/yad123456/",                 "jalan.net じゃらん"),
+        ("https://www.tripadvisor.jp/Restaurant_Review-g1066456-d1234567.html",
+                                                             "tripadvisor.jp"),
+        ("https://booking.com/hotel/jp/example.html",        "booking.com"),
+        ("https://yelp.co.jp/biz/example",                   "yelp.co.jp"),
+    ]
+    review_good_urls = [
+        ("https://sushiro.co.jp/",                           "スシロー公式HP"),
+        ("https://www.yoshinoya.com/",                       "吉野家公式HP"),
+        ("https://hotel-example.co.jp/",                     "ホテル公式HP"),
+    ]
+    for url, label in review_bad_urls:
+        check(f"  {label} が除外される",
+              not _is_valid_result_url(url, SKIP_DOMAINS))
+    for url, label in review_good_urls:
         check(f"  {label} は通過する",
               _is_valid_result_url(url, SKIP_DOMAINS))
 
