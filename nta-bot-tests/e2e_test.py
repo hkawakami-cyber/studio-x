@@ -24,6 +24,7 @@ nta-bot E2E テスト
  20. normalize_url スキーム/ホスト小文字化・デフォルトポート除去・URLショートナー SKIP_DOMAINS
  21. normalize_url クエリパラメータソート・SNS/ニュース/EC サイト SKIP_DOMAINS
  22. ワイルドカード SKIP_DOMAINS マッチング（"google." 系）/ normalize_url 末尾スラッシュ正規化
+ 23. ソフトエラーページ検出（HTTP 200 でも実質 404/403/503 なページを url_failed に振り分け）
 """
 
 import asyncio
@@ -298,6 +299,38 @@ def is_bad_url(url: str) -> bool:
         return False
     except Exception:
         return False
+
+
+# HTTP 200 でも実質エラーページとして検出するタイトルパターン
+# 英数字は \b 付きの語境界チェック、日本語は境界なしで直接マッチ
+_BAD_TITLE_PATTERNS = re.compile(
+    r"\b(?:404|not found|page not found|403|forbidden|access denied"
+    r"|500|internal server error|503|service unavailable)\b"
+    r"|ページが見つかりません|お探しのページ|アクセスできません|アクセス拒否"
+    r"|メンテナンス中|サーバーエラー",
+    re.IGNORECASE,
+)
+
+_MIN_BODY_LEN = 200  # これ以下の本文長はコンテンツなしと判定
+
+
+def is_soft_error_page(title: str | None, body_text: str | None) -> str | None:
+    """
+    HTTP 200 でも実質エラーページを検出する（ソフト404/403/503対応）。
+    戻り値: "not_found" | "blocked" | "fetch_failed" | None（正常 or 判定不能）
+    """
+    if title and _BAD_TITLE_PATTERNS.search(title):
+        tl = title.lower()
+        if ("404" in tl or "not found" in tl
+                or "見つかりません" in title or "お探しのページ" in title):
+            return "not_found"
+        if ("403" in tl or "forbidden" in tl or "access denied" in tl
+                or "アクセスできません" in title or "アクセス拒否" in title):
+            return "blocked"
+        return "fetch_failed"  # 500/503/メンテナンス等
+    if body_text is not None and len(body_text.strip()) < _MIN_BODY_LEN:
+        return "fetch_failed"  # 本文が極端に短い（画像のみ等）
+    return None
 
 
 _UTM_PARAMS = frozenset([
@@ -1565,6 +1598,73 @@ def run_tests():
     ]
     for url, expected, label in norm22_cases:
         result = normalize_url(url)
+        check(f"  {label}", result == expected,
+              f"期待={expected!r}, 実際={result!r}")
+
+    # ── テスト 23: ソフトエラーページ検出（HTTP 200 でも実質エラー）──
+    print("\n▼ Test 23: ソフトエラーページ検出（HTTP 200 でも実質エラー）")
+
+    soft_error_cases = [
+        # (title, body_text, 期待error, ラベル)
+        ("404 Not Found",
+         "Long body text here " * 20,
+         "not_found",
+         "英語 404 タイトル"),
+        ("ページが見つかりません | サイト名",
+         "コンテンツ " * 20,
+         "not_found",
+         "日本語 404 タイトル"),
+        ("お探しのページが見つかりませんでした",
+         "テキスト " * 20,
+         "not_found",
+         "日本語 404 タイトル（長い）"),
+        ("403 Forbidden",
+         "Access denied " * 20,
+         "blocked",
+         "英語 403 タイトル"),
+        ("Access Denied",
+         "アクセス拒否 " * 20,
+         "blocked",
+         "Access Denied タイトル"),
+        ("アクセスできません",
+         "このページにはアクセスできません " * 10,
+         "blocked",
+         "日本語 403 タイトル"),
+        ("500 Internal Server Error",
+         "Error " * 20,
+         "fetch_failed",
+         "500 エラータイトル"),
+        ("503 Service Unavailable",
+         "Down " * 20,
+         "fetch_failed",
+         "503 タイトル"),
+        ("メンテナンス中",
+         "ただいまメンテナンス中です。 " * 5,
+         "fetch_failed",
+         "メンテナンスページ"),
+        ("会社概要 | 株式会社テスト",
+         "充実した会社概要のコンテンツです。 " * 15,
+         None,
+         "正常ページ（除外しない）"),
+        ("テスト株式会社",
+         "a" * 300,
+         None,
+         "本文十分（正常）"),
+        ("正常タイトル",
+         "a" * 50,
+         "fetch_failed",
+         "本文不十分（空ページ相当）"),
+        (None,
+         "a" * 50,
+         "fetch_failed",
+         "タイトルなし＋短い本文"),
+        (None,
+         "a" * 300,
+         None,
+         "タイトルなし＋本文十分（正常扱い）"),
+    ]
+    for title, body, expected, label in soft_error_cases:
+        result = is_soft_error_page(title, body)
         check(f"  {label}", result == expected,
               f"期待={expected!r}, 実際={result!r}")
 
