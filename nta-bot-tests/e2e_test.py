@@ -30,6 +30,7 @@ nta-bot E2E テスト
  26. classify_title_quality（タイトル品質分類: no_title / too_short / numeric_only / ok）
  27. check_db_consistency（DB整合性チェック + watchdog 適用後の問題解消確認）
  28. fetch_url_batch / fetch_scrape_batch（attempts 上限・バッチサイズ制御テスト）
+ 29. write_full_scrape_result（crawl_queue + corporations 統合書き込み・テーブル間整合確認）
 """
 
 import asyncio
@@ -558,6 +559,56 @@ def fetch_scrape_batch_sim(conn, batch_size: int = 10, max_attempts: int = 3) ->
     ).rowcount
     conn.commit()
     return n
+
+
+def write_full_scrape_result_sim(conn, results):
+    """
+    スクレイプ結果を crawl_queue と corporations の両方に書き込む統合シミュレーション。
+    - done (ok=True): crawl_queue→done, corporations を hp_url/hp_title/hp_scraped_at で更新
+    - bad_url/not_found/no_url: crawl_queue→url_failed(hp_url=NULL), corporations も NULL クリア
+    - blocked: crawl_queue→url_failed, corporations は変更なし（一時的ブロック・再試行前提）
+    - fetch_failed: crawl_queue→error, corporations は変更なし
+    """
+    import datetime
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    for r in results:
+        cn, ok, error = r["corporate_number"], r.get("ok", False), r.get("error")
+        hp_url, title = r.get("hp_url"), r.get("title")
+        if error in ("bad_url", "not_found", "no_url"):
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_failed', hp_url=NULL, "
+                "error=?, attempts=0 WHERE corporate_number=?",
+                (error, cn),
+            )
+            conn.execute(
+                "UPDATE corporations SET hp_url=NULL, hp_title=NULL, hp_scraped_at=NULL "
+                "WHERE corporate_number=?",
+                (cn,),
+            )
+        elif error == "blocked":
+            conn.execute(
+                "UPDATE crawl_queue SET status='url_failed', error='blocked', attempts=0 "
+                "WHERE corporate_number=?",
+                (cn,),
+            )
+            # corporations は変更なし（一時的ブロックのため再試行前提）
+        elif ok and hp_url and title:
+            conn.execute(
+                "UPDATE crawl_queue SET status='done', error=NULL WHERE corporate_number=?",
+                (cn,),
+            )
+            conn.execute(
+                "UPDATE corporations SET hp_url=?, hp_title=?, hp_scraped_at=? "
+                "WHERE corporate_number=?",
+                (hp_url, title, now, cn),
+            )
+        else:
+            conn.execute(
+                "UPDATE crawl_queue SET status='error', error=? WHERE corporate_number=?",
+                (error or "fetch_failed", cn),
+            )
+            # corporations は変更なし（再試行で回復の可能性あり）
+    conn.commit()
 
 
 def write_url_results_sim(conn, results):
@@ -2215,6 +2266,108 @@ def run_tests():
         conn28.close()
     finally:
         for f in [tmp28, tmp28 + "-shm", tmp28 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 29: write_full_scrape_result（crawl_queue + corporations 統合書き込み）──
+    print("\n▼ Test 29: write_full_scrape_result（crawl_queue + corporations 両テーブル整合確認）")
+
+    tmp29 = tempfile.mktemp(suffix=".db")
+    try:
+        conn29 = sqlite3.connect(tmp29)
+        conn29.row_factory = sqlite3.Row
+        conn29.executescript("""
+            CREATE TABLE corporations (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, kind TEXT,
+                hp_url TEXT, hp_title TEXT, hp_scraped_at TEXT
+            );
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        sample_url = "https://example.co.jp/"
+        conn29.executemany(
+            "INSERT INTO corporations VALUES (?,?,?,?,?,?)",
+            [
+                ("I001", "正常スクレイプ",   "2015", sample_url, None, None),
+                ("I002", "bad_url 判明",      "2015", "https://s.yimg.jp/icon.ico", None, None),
+                ("I003", "404 not_found",     "2015", "https://gone.co.jp/",        None, None),
+                ("I004", "blocked(403)",      "2015", "https://block.co.jp/",       None, None),
+                ("I005", "fetch_failed",      "2015", "https://dead.co.jp/",        None, None),
+                ("I006", "no_url",            "2015", None,                         None, None),
+            ],
+        )
+        conn29.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("I001", "正常スクレイプ",  "東", "千", "scraping", 1, sample_url,                  None, None),
+                ("I002", "bad_url 判明",    "東", "千", "scraping", 1, "https://s.yimg.jp/icon.ico",None, None),
+                ("I003", "404 not_found",   "東", "千", "scraping", 1, "https://gone.co.jp/",       None, None),
+                ("I004", "blocked(403)",    "東", "千", "scraping", 1, "https://block.co.jp/",      None, None),
+                ("I005", "fetch_failed",    "東", "千", "scraping", 2, "https://dead.co.jp/",       None, None),
+                ("I006", "no_url",          "東", "千", "scraping", 1, None,                        None, None),
+            ],
+        )
+        conn29.commit()
+
+        scrape_results = [
+            {"corporate_number": "I001", "ok": True,  "hp_url": sample_url, "title": "テスト株式会社"},
+            {"corporate_number": "I002", "ok": False, "error": "bad_url"},
+            {"corporate_number": "I003", "ok": False, "error": "not_found"},
+            {"corporate_number": "I004", "ok": False, "error": "blocked"},
+            {"corporate_number": "I005", "ok": False, "error": "fetch_failed"},
+            {"corporate_number": "I006", "ok": False, "error": "no_url"},
+        ]
+        write_full_scrape_result_sim(conn29, scrape_results)
+
+        q = {r["corporate_number"]: r for r in conn29.execute("SELECT * FROM crawl_queue").fetchall()}
+        c = {r["corporate_number"]: r for r in conn29.execute("SELECT * FROM corporations").fetchall()}
+
+        # I001: done → corporations 更新
+        check("done: crawl_queue が done に移行",
+              q["I001"]["status"] == "done",  f"実際={q['I001']['status']}")
+        check("done: corporations の hp_url が保存される",
+              c["I001"]["hp_url"] == sample_url, f"実際={c['I001']['hp_url']}")
+        check("done: corporations の hp_title が保存される",
+              c["I001"]["hp_title"] == "テスト株式会社", f"実際={c['I001']['hp_title']}")
+        check("done: corporations の hp_scraped_at が設定される",
+              c["I001"]["hp_scraped_at"] is not None)
+
+        # I002: bad_url → crawl_queue url_failed + corporations NULL クリア
+        check("bad_url: crawl_queue が url_failed に移行",
+              q["I002"]["status"] == "url_failed", f"実際={q['I002']['status']}")
+        check("bad_url: corporations の hp_url が NULL クリアされる",
+              c["I002"]["hp_url"] is None, f"実際={c['I002']['hp_url']}")
+
+        # I003: not_found → 同様に corporations クリア
+        check("not_found: corporations の hp_url が NULL クリアされる",
+              c["I003"]["hp_url"] is None, f"実際={c['I003']['hp_url']}")
+
+        # I004: blocked → crawl_queue url_failed, corporations は変更なし
+        check("blocked: crawl_queue が url_failed に移行",
+              q["I004"]["status"] == "url_failed", f"実際={q['I004']['status']}")
+        check("blocked: corporations の hp_url は変更されない（再試行前提）",
+              c["I004"]["hp_url"] == "https://block.co.jp/",
+              f"実際={c['I004']['hp_url']}")
+
+        # I005: fetch_failed → crawl_queue error, corporations 変更なし
+        check("fetch_failed: crawl_queue が error に移行",
+              q["I005"]["status"] == "error", f"実際={q['I005']['status']}")
+        check("fetch_failed: corporations の hp_url は変更されない",
+              c["I005"]["hp_url"] == "https://dead.co.jp/",
+              f"実際={c['I005']['hp_url']}")
+
+        # I006: no_url → corporations NULL クリア
+        check("no_url: corporations の hp_url が NULL クリアされる（元々 NULL）",
+              c["I006"]["hp_url"] is None)
+
+        conn29.close()
+    finally:
+        for f in [tmp29, tmp29 + "-shm", tmp29 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
