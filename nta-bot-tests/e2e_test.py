@@ -28,6 +28,7 @@ nta-bot E2E テスト
  24. write_url_results 統合テスト（SKIP判定 + CDN除外 + normalize_url を組み合わせた書き込み）
  25. extract_page_info + is_soft_error_page 統合テスト（HTML → タイトル/本文抽出 → ソフトエラー判定）
  26. classify_title_quality（タイトル品質分類: no_title / too_short / numeric_only / ok）
+ 27. check_db_consistency（DB整合性チェック + watchdog 適用後の問題解消確認）
 """
 
 import asyncio
@@ -489,6 +490,37 @@ def extract_page_info(html: str) -> dict:
     body_text = body_text[:1000] if body_text else None
 
     return {"title": title, "body_text": body_text}
+
+
+def check_db_consistency(conn) -> dict:
+    """
+    DB の状態整合性をチェックし、問題のある件数を返す。
+    定期的に実行して積算された問題を検出するのに使用。
+
+    戻り値キー:
+    - url_found_null_url  : url_found で hp_url=NULL（watchdog が処理すべき）
+    - stuck_url_searching : url_searching スタック（watchdog リセット対象）
+    - stuck_scraping      : scraping スタック（watchdog リセット対象）
+    - error_fetch_failed  : error で fetch_failed（watchdog の skip 処理対象）
+    - done_no_url         : done で hp_url=NULL（データ整合性エラー・要手動修正）
+    """
+    issues = {}
+    issues["url_found_null_url"] = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='url_found' AND hp_url IS NULL"
+    ).fetchone()[0]
+    issues["stuck_url_searching"] = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='url_searching'"
+    ).fetchone()[0]
+    issues["stuck_scraping"] = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='scraping'"
+    ).fetchone()[0]
+    issues["error_fetch_failed"] = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='error' AND error LIKE 'fetch_failed%'"
+    ).fetchone()[0]
+    issues["done_no_url"] = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='done' AND hp_url IS NULL"
+    ).fetchone()[0]
+    return issues
 
 
 def write_url_results_sim(conn, results):
@@ -1965,6 +1997,94 @@ def run_tests():
         check(f"  総合判定: {label}",
               result == expected,
               f"期待={expected!r}, 実際={result!r}")
+
+    # ── テスト 27: DB整合性チェック + watchdog 適用後の改善確認 ──
+    print("\n▼ Test 27: check_db_consistency（DB整合性チェック）")
+
+    tmp27 = tempfile.mktemp(suffix=".db")
+    try:
+        conn27 = sqlite3.connect(tmp27)
+        conn27.row_factory = sqlite3.Row
+        conn27.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        conn27.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                # 問題あり: url_found で hp_url=NULL
+                ("H001", "url_found NULL 1", "東", "千", "url_found",     2, None,                       None,          None),
+                ("H002", "url_found NULL 2", "東", "千", "url_found",     1, None,                       None,          None),
+                # 問題あり: url_searching スタック
+                ("H003", "url_searching スタック", "東", "千", "url_searching", 1, None,                  None,          None),
+                # 問題あり: scraping スタック
+                ("H004", "scraping スタック",       "東", "千", "scraping",      2, "https://x.co.jp",   None,          None),
+                # 問題あり: error + fetch_failed（watchdog の skip 対象）
+                ("H005", "fetch_failed error",       "東", "千", "error",         3, "https://dead.co.jp","fetch_failed",None),
+                # 問題あり: done で hp_url=NULL（データ整合性エラー）
+                ("H006", "done NULL hp_url",         "東", "千", "done",          3, None,                None,          None),
+                # 問題なし: 正常レコード
+                ("H007", "正常 done",                "東", "千", "done",          3, "https://ok.co.jp",  None,          None),
+                ("H008", "正常 pending",             "東", "千", "pending",       0, None,                None,          None),
+                ("H009", "正常 url_found URL あり",  "東", "千", "url_found",     1, "https://a.co.jp",  None,          None),
+            ],
+        )
+        conn27.commit()
+
+        # ① チェック前の整合性確認
+        before = check_db_consistency(conn27)
+
+        check("事前: url_found_null_url が 2 件検出される",
+              before["url_found_null_url"] == 2,
+              f"実際={before['url_found_null_url']}")
+        check("事前: stuck_url_searching が 1 件検出される",
+              before["stuck_url_searching"] == 1,
+              f"実際={before['stuck_url_searching']}")
+        check("事前: stuck_scraping が 1 件検出される",
+              before["stuck_scraping"] == 1,
+              f"実際={before['stuck_scraping']}")
+        check("事前: error_fetch_failed が 1 件検出される",
+              before["error_fetch_failed"] == 1,
+              f"実際={before['error_fetch_failed']}")
+        check("事前: done_no_url が 1 件検出される",
+              before["done_no_url"] == 1,
+              f"実際={before['done_no_url']}")
+
+        # ② watchdog の reset_stuck を適用
+        reset_stuck_watchdog(conn27)
+
+        # ③ チェック後の整合性確認
+        after = check_db_consistency(conn27)
+
+        check("適用後: url_found_null_url が 0 に解消（url_failed へ移動）",
+              after["url_found_null_url"] == 0,
+              f"実際={after['url_found_null_url']}")
+        check("適用後: stuck_url_searching が 0 に解消（pending へ）",
+              after["stuck_url_searching"] == 0,
+              f"実際={after['stuck_url_searching']}")
+        check("適用後: stuck_scraping が 0 に解消（url_found へ）",
+              after["stuck_scraping"] == 0,
+              f"実際={after['stuck_scraping']}")
+        check("適用後: error_fetch_failed が 0 に解消（skip へ）",
+              after["error_fetch_failed"] == 0,
+              f"実際={after['error_fetch_failed']}")
+        check("適用後: done_no_url は watchdog では解消されない（手動修正が必要）",
+              after["done_no_url"] == 1,
+              f"実際={after['done_no_url']}")
+        check("正常 url_found(hp_url あり) は変更されない",
+              conn27.execute(
+                  "SELECT status FROM crawl_queue WHERE corporate_number='H009'"
+              ).fetchone()["status"] == "url_found")
+
+        conn27.close()
+    finally:
+        for f in [tmp27, tmp27 + "-shm", tmp27 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
