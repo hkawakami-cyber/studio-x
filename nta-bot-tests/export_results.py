@@ -31,8 +31,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DEFAULT_DB   = Path.home() / "Downloads/nta-bot/data/crawl.db"
-DEFAULT_OUT_DIR = Path.home() / "Downloads/nta-bot"
+DEFAULT_DB      = Path.home() / "Downloads/houjin.db"
+DEFAULT_OUT_DIR = Path.home() / "Downloads"
 COLUMNS = [
     "corporate_number",
     "name",
