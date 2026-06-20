@@ -226,6 +226,37 @@ def is_bad_url(url: str) -> bool:
         return False
 
 
+_UTM_PARAMS = frozenset([
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "fbclid", "gclid", "msclkid", "yclid",
+])
+
+def normalize_url(url: str) -> str | None:
+    """
+    URLを正規化して保存する。
+    - フラグメント(#以降)除去
+    - UTM/トラッキングパラメータ除去
+    - クエリが空になったら ? ごと除去
+    - 正規化できない場合は None を返す
+    """
+    try:
+        p = urlparse(url)
+        if not p.scheme or not p.netloc:
+            return None
+        # クエリパラメータからトラッキング系を除去
+        if p.query:
+            pairs = [kv for kv in p.query.split("&")
+                     if kv.split("=")[0].lower() not in _UTM_PARAMS]
+            query = "&".join(pairs)
+        else:
+            query = ""
+        from urllib.parse import urlunparse
+        normalized = urlunparse((p.scheme, p.netloc, p.path, p.params, query, ""))
+        return normalized or None
+    except Exception:
+        return None
+
+
 def reset_bad_domains(conn, bad_domains):
     """本番と同じリセットロジック"""
     total_corp = 0
@@ -1078,6 +1109,70 @@ def run_tests():
     for url, label in path_good_urls:
         check(f"  正常URL通過: {label}",
               _is_valid_result_url(url, SKIP_DOMAINS))
+
+    # ── テスト 16: URL正規化（UTMパラメータ・フラグメント除去）────
+    print("\n▼ Test 16: normalize_url（UTMパラメータ・フラグメント除去）")
+
+    norm_cases = [
+        # (入力URL, 期待される正規化後URL, ラベル)
+        ("https://example.co.jp/?utm_source=google&utm_medium=cpc",
+         "https://example.co.jp/?",  # クエリは空になるが urlunparse で ? が残る場合あり
+         "→", "https://example.co.jp/",
+         "UTMパラメータ全除去"),
+        ("https://example.co.jp/about#section1",
+         None, "→", "https://example.co.jp/about",
+         "フラグメント(#)除去"),
+        ("https://example.co.jp/?ref=toppage&utm_campaign=summer",
+         None, "→", "https://example.co.jp/?ref=toppage",
+         "非UTMパラメータは残す"),
+        ("https://example.co.jp/?fbclid=abc123",
+         None, "→", "https://example.co.jp/",
+         "fbclid 除去"),
+        ("https://example.co.jp/page?gclid=xyz&page=2",
+         None, "→", "https://example.co.jp/page?page=2",
+         "gclid 除去、他パラメータ保持"),
+        ("https://example.co.jp/",
+         None, "→", "https://example.co.jp/",
+         "変更なし（正常URL）"),
+    ]
+
+    # urlunparse は空クエリでも ? を付けない仕様なので個別に検証
+    norm_inputs_expected = [
+        ("https://example.co.jp/?utm_source=google&utm_medium=cpc",
+         "https://example.co.jp/",
+         "UTMパラメータ全除去 → クエリなし"),
+        ("https://example.co.jp/about#section1",
+         "https://example.co.jp/about",
+         "フラグメント(#)除去"),
+        ("https://example.co.jp/?ref=toppage&utm_campaign=summer",
+         "https://example.co.jp/?ref=toppage",
+         "非UTMパラメータは残す"),
+        ("https://example.co.jp/?fbclid=abc123",
+         "https://example.co.jp/",
+         "fbclid 除去"),
+        ("https://example.co.jp/page?gclid=xyz&page=2",
+         "https://example.co.jp/page?page=2",
+         "gclid 除去、page パラメータ保持"),
+        ("https://example.co.jp/",
+         "https://example.co.jp/",
+         "変更なし（正常URL）"),
+        (None,
+         None,
+         "None 入力 → None"),
+        ("not-a-url",
+         None,
+         "不正URL → None"),
+    ]
+
+    for url, expected, label in norm_inputs_expected:
+        if url is None:
+            result = normalize_url("") if url is None else normalize_url(url)
+            # None入力は None 返す
+            check(f"  {label}", result is None, f"結果={result}")
+        else:
+            result = normalize_url(url)
+            check(f"  {label}", result == expected,
+                  f"期待={expected!r}, 実際={result!r}")
 
     # ── 結果サマリー ─────────────────────────────────────────
     print("\n" + "=" * 60)
