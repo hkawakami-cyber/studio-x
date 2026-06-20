@@ -18,7 +18,12 @@ Mac上の enricher.py と watchdog.py に累積的な改善を適用するパッ
   E09  is_soft_error_page: HTTP 200 実質エラーページ検出
   E10  classify_title_quality: タイトル品質分類
   E11  extract_page_info: HTMLからタイトル・本文を抽出
+  E12  write_url_results: normalize_url 適用（URL保存前に正規化）
+  E13  estimate_crawl_progress: クロール進捗統計
   W01  reset_stuck: url_found(hp_url=NULL) → url_failed 追加
+  W02  triage_url_failed: エラー種別ごとの最適再試行戦略
+  W03  check_db_consistency: DB整合性チェック関数追加
+  W04  detect_duplicate_urls / reset_duplicate_urls: ポータルURL検出・リセット
 """
 
 import ast
@@ -673,6 +678,124 @@ def extract_page_info(html: str) -> dict:
         fail(name, "構文エラー — ロールバック済み")
 
 
+def patch_e12_write_url_results_normalize(path: Path):
+    """E12 write_url_results: hp_url を normalize_url で正規化してから保存"""
+    name = "E12 write_url_results normalize_url 適用"
+    text = path.read_text(encoding="utf-8")
+    if "# E12_normalize" in text:
+        skip(name)
+        return
+    if "normalize_url" not in text:
+        fail(name, "normalize_url 未検出 (E05 を先に適用してください)")
+        return
+    if "write_url_results" not in text:
+        fail(name, "write_url_results 関数が見つかりません")
+        return
+
+    # 書き込み前に normalize を挟む典型パターン
+    candidates = [
+        # パターン1: hp_url=url をそのまま書いているケース
+        (
+            "status='url_found', hp_url=url,",
+            "# E12_normalize\n            hp_url=normalize_url(url) or url,\n            status='url_found', hp_url=normalize_url(url) or url,"
+        ),
+        # パターン2: SET 文で url を直接使うケース
+        (
+            "SET status='url_found', hp_url=?",
+            "SET status='url_found', hp_url=?  -- E12_normalize (normalize before bind)"
+        ),
+    ]
+
+    # 最も単純な追加: write_url_results を見つけて hp_url=url の直前に normalize 行を注入
+    # 既存コードのパターンを検索
+    import re as _re
+    # "hp_url=url" または "hp_url = url" の行を探す
+    m = _re.search(r'([ \t]+)(hp_url\s*=\s*url)(\b)', text)
+    if m:
+        old_line = m.group(0)
+        new_line = m.group(1) + "# E12_normalize\n" + m.group(1) + "hp_url = normalize_url(url) or url"
+        text = text.replace(old_line, new_line, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new_line, old_line, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return
+
+    # パターン: コード内の url_found 書き込みで norm を追加
+    for old_s, new_s in [
+        ("'url_found', url,", "# E12_normalize\n            'url_found', normalize_url(url) or url,"),
+        ('"url_found", url,', '# E12_normalize\n            "url_found", normalize_url(url) or url,'),
+    ]:
+        if old_s in text:
+            text = text.replace(old_s, new_s, 1)
+            path.write_text(text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return
+            path.write_text(text.replace(new_s, old_s, 1), encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return
+
+    fail(name, "write_url_results 内の hp_url=url パターンが見つかりません — 手動確認が必要")
+
+
+def patch_e13_estimate_crawl_progress(path: Path):
+    """E13 estimate_crawl_progress: クロール進捗統計関数追加"""
+    name = "E13 estimate_crawl_progress 追加"
+    text = path.read_text(encoding="utf-8")
+    if "estimate_crawl_progress" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def estimate_crawl_progress(conn) -> dict:
+    """
+    クロール進捗統計を返す。
+    戻り値キー: total, done, skip, pending, url_found, url_failed, error,
+               completion_pct, remaining
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM crawl_queue GROUP BY status"
+    ).fetchall()
+    counts = {r[0]: r[1] for r in rows}
+    total = sum(counts.values())
+    done  = counts.get("done",  0)
+    skip  = counts.get("skip",  0)
+    finished = done + skip
+    return {
+        "total":          total,
+        "done":           done,
+        "skip":           skip,
+        "pending":        counts.get("pending",      0),
+        "url_searching":  counts.get("url_searching",0),
+        "url_found":      counts.get("url_found",    0),
+        "url_failed":     counts.get("url_failed",   0),
+        "scraping":       counts.get("scraping",     0),
+        "error":          counts.get("error",        0),
+        "remaining":      total - finished,
+        "completion_pct": round(finished / total * 100, 2) if total else 0.0,
+    }
+
+'''
+
+    for anchor in ["def estimate_crawl", "def check_db_consistency(", "def reset_stuck("]:
+        if anchor in text and anchor != "def estimate_crawl":
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
 # ═══════════════════════════════════════════════════════════
 #  watchdog.py パッチ
 # ═══════════════════════════════════════════════════════════
@@ -728,6 +851,182 @@ def patch_w01_null_url_watchdog(path: Path):
     fail(name, "reset_stuck の commit パターンが見つかりません — 手動確認が必要")
 
 
+def patch_w02_triage_url_failed(path: Path):
+    """W02 triage_url_failed: url_failed エラー種別ごとの最適再試行戦略"""
+    name = "W02 triage_url_failed 追加"
+    text = path.read_text(encoding="utf-8")
+    if "triage_url_failed" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def triage_url_failed(conn, fetch_failed_max_attempts: int = 3) -> dict:
+    """
+    url_failed のエラー種別ごとに最適なステータスへ移動する。
+    - not_found (404)    : skip（URL自体が存在しない → 諦め）
+    - bad_url (CDN等)    : pending + hp_url クリア（URL再検索）
+    - blocked (403/429)  : pending（後でリトライ）
+    - no_url             : pending + hp_url クリア（URL再検索）
+    - fetch_failed       : attempts 少 → pending リトライ / 多 → skip
+    戻り値: {not_found, bad_url, blocked, no_url, ff_retry, ff_skip}
+    """
+    n_not_found = conn.execute(
+        "UPDATE crawl_queue SET status='skip', error='not_found_permanent' "
+        "WHERE status='url_failed' AND error='not_found'"
+    ).rowcount
+    n_bad_url = conn.execute(
+        "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='bad_url'"
+    ).rowcount
+    n_blocked = conn.execute(
+        "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='blocked'"
+    ).rowcount
+    n_no_url = conn.execute(
+        "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='no_url'"
+    ).rowcount
+    n_ff_retry = conn.execute(
+        "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='fetch_failed' AND attempts < ?",
+        (fetch_failed_max_attempts,),
+    ).rowcount
+    n_ff_skip = conn.execute(
+        "UPDATE crawl_queue SET status='skip', error='fetch_failed_permanent' "
+        "WHERE status='url_failed' AND error='fetch_failed' AND attempts >= ?",
+        (fetch_failed_max_attempts,),
+    ).rowcount
+    conn.commit()
+    return {
+        "not_found": n_not_found, "bad_url": n_bad_url,
+        "blocked": n_blocked,     "no_url": n_no_url,
+        "ff_retry": n_ff_retry,   "ff_skip": n_ff_skip,
+    }
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def patch_w03_check_db_consistency(path: Path):
+    """W03 check_db_consistency: DB整合性チェック関数追加"""
+    name = "W03 check_db_consistency 追加"
+    text = path.read_text(encoding="utf-8")
+    if "check_db_consistency" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def check_db_consistency(conn) -> dict:
+    """
+    DB の整合性問題件数を返す（定期監視用）。
+    戻り値キー: url_found_null_url, stuck_url_searching, stuck_scraping,
+               error_fetch_failed, done_no_url
+    """
+    return {
+        "url_found_null_url": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='url_found' AND hp_url IS NULL"
+        ).fetchone()[0],
+        "stuck_url_searching": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='url_searching'"
+        ).fetchone()[0],
+        "stuck_scraping": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='scraping'"
+        ).fetchone()[0],
+        "error_fetch_failed": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='error' AND error LIKE 'fetch_failed%'"
+        ).fetchone()[0],
+        "done_no_url": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='done' AND hp_url IS NULL"
+        ).fetchone()[0],
+    }
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def patch_w04_duplicate_urls(path: Path):
+    """W04 detect_duplicate_urls / reset_duplicate_urls: ポータルURL検出・リセット"""
+    name = "W04 detect_duplicate_urls / reset_duplicate_urls 追加"
+    text = path.read_text(encoding="utf-8")
+    if "detect_duplicate_urls" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def detect_duplicate_urls(conn, threshold: int = 5) -> list:
+    """
+    同一 hp_url が threshold 件以上の企業に割り当てられているものを返す。
+    戻り値: [(hp_url, count), ...] count 降順
+    """
+    rows = conn.execute(
+        "SELECT hp_url, COUNT(*) as cnt FROM crawl_queue "
+        "WHERE status IN ('done','url_found') AND hp_url IS NOT NULL "
+        "GROUP BY hp_url HAVING cnt >= ? ORDER BY cnt DESC",
+        (threshold,),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def reset_duplicate_urls(conn, threshold: int = 5) -> tuple:
+    """
+    重複URLを持つレコードを pending に戻し hp_url をクリアする。
+    戻り値: (crawl_queue リセット件数, corporations クリア件数)
+    """
+    duplicate_urls = [url for url, _ in detect_duplicate_urls(conn, threshold)]
+    if not duplicate_urls:
+        return 0, 0
+    n_queue = n_corps = 0
+    for url in duplicate_urls:
+        n_queue += conn.execute(
+            "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+            "WHERE hp_url=? AND status IN ('done','url_found')",
+            (url,),
+        ).rowcount
+        try:
+            n_corps += conn.execute(
+                "UPDATE corporations SET hp_url=NULL, hp_title=NULL, hp_scraped_at=NULL "
+                "WHERE hp_url=?",
+                (url,),
+            ).rowcount
+        except Exception:
+            pass
+    conn.commit()
+    return n_queue, n_corps
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def _append_to_watchdog(path: Path, func_code: str, name: str):
+    """watchdog.py の末尾（if __name__ == '__main__': の直前）に関数を追加する"""
+    text = path.read_text(encoding="utf-8")
+    # if __name__ ブロックの直前に挿入
+    for anchor in ['if __name__ == "__main__":', "if __name__ == '__main__':"]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            path.write_text(text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return
+            path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return
+    # __main__ ブロックがない → ファイル末尾に追加
+    text += func_code
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
 # ═══════════════════════════════════════════════════════════
 #  メイン
 # ═══════════════════════════════════════════════════════════
@@ -766,10 +1065,15 @@ def main():
     patch_e09_soft_error_page(ENRICHER)
     patch_e10_classify_title_quality(ENRICHER)
     patch_e11_extract_page_info(ENRICHER)
+    patch_e12_write_url_results_normalize(ENRICHER)
+    patch_e13_estimate_crawl_progress(ENRICHER)
 
     # ── watchdog.py ──────────────────────────────────────────
     print("\n▼ watchdog.py")
     patch_w01_null_url_watchdog(WATCHDOG)
+    patch_w02_triage_url_failed(WATCHDOG)
+    patch_w03_check_db_consistency(WATCHDOG)
+    patch_w04_duplicate_urls(WATCHDOG)
 
     # ── サマリー ─────────────────────────────────────────────
     print(f"\n{'=' * 65}")

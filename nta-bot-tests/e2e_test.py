@@ -32,6 +32,7 @@ nta-bot E2E テスト
  28. fetch_url_batch / fetch_scrape_batch（attempts 上限・バッチサイズ制御テスト）
  29. write_full_scrape_result（crawl_queue + corporations 統合書き込み・テーブル間整合確認）
  30. detect_duplicate_urls / reset_duplicate_urls（ポータルURL検出・同一URLが多数企業に割り当たる場合を検出）
+ 31. estimate_crawl_progress（クロール進捗統計: total/done/skip/remaining/completion_pct）
 """
 
 import asyncio
@@ -599,6 +600,33 @@ def reset_duplicate_urls(conn, threshold: int = 5) -> tuple:
         ).rowcount
     conn.commit()
     return n_queue, n_corps
+
+
+def estimate_crawl_progress(conn) -> dict:
+    """
+    クロール進捗統計を返す（E13 で enricher.py に追加される関数）。
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM crawl_queue GROUP BY status"
+    ).fetchall()
+    counts = {r[0]: r[1] for r in rows}
+    total = sum(counts.values())
+    done  = counts.get("done",  0)
+    skip_ = counts.get("skip",  0)
+    finished = done + skip_
+    return {
+        "total":          total,
+        "done":           done,
+        "skip":           skip_,
+        "pending":        counts.get("pending",       0),
+        "url_searching":  counts.get("url_searching", 0),
+        "url_found":      counts.get("url_found",     0),
+        "url_failed":     counts.get("url_failed",    0),
+        "scraping":       counts.get("scraping",      0),
+        "error":          counts.get("error",         0),
+        "remaining":      total - finished,
+        "completion_pct": round(finished / total * 100, 2) if total else 0.0,
+    }
 
 
 def write_full_scrape_result_sim(conn, results):
@@ -2499,6 +2527,80 @@ def run_tests():
         conn30.close()
     finally:
         for f in [tmp30, tmp30 + "-shm", tmp30 + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 31: estimate_crawl_progress（進捗統計）─────────
+    print("\n▼ Test 31: estimate_crawl_progress（クロール進捗統計）")
+
+    tmp31 = tempfile.mktemp(suffix=".db")
+    try:
+        conn31 = sqlite3.connect(tmp31)
+        conn31.row_factory = sqlite3.Row
+        conn31.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER,
+                hp_url TEXT, error TEXT, last_attempt TEXT
+            );
+        """)
+        # 総数 20件: done=10, skip=2, pending=4, url_found=1, url_failed=1, error=1, url_searching=1
+        statuses = (
+            [("done",          "https://ok{}.co.jp") for _ in range(10)] +
+            [("skip",          None)                  for _ in range(2)]  +
+            [("pending",       None)                  for _ in range(4)]  +
+            [("url_found",     "https://uf.co.jp")]   +
+            [("url_failed",    None)]                 +
+            [("error",         None)]                 +
+            [("url_searching", None)]
+        )
+        conn31.executemany(
+            "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (f"Z{i:03d}", f"企業{i}", "東", "千", st,
+                 0, url.format(i) if url else None, None, None)
+                for i, (st, url) in enumerate(statuses)
+            ],
+        )
+        conn31.commit()
+
+        prog = estimate_crawl_progress(conn31)
+
+        check("total = 20",
+              prog["total"] == 20, f"実際={prog['total']}")
+        check("done = 10",
+              prog["done"] == 10, f"実際={prog['done']}")
+        check("skip = 2",
+              prog["skip"] == 2, f"実際={prog['skip']}")
+        check("pending = 4",
+              prog["pending"] == 4, f"実際={prog['pending']}")
+        check("url_found = 1",
+              prog["url_found"] == 1, f"実際={prog['url_found']}")
+        check("remaining = 8 (total - done - skip)",
+              prog["remaining"] == 8, f"実際={prog['remaining']}")
+        check("completion_pct = 60.0 ((10+2)/20 * 100)",
+              prog["completion_pct"] == 60.0, f"実際={prog['completion_pct']}")
+
+        # 全件 done にした後の 100% 確認
+        conn31.execute("UPDATE crawl_queue SET status='done', hp_url='https://x.co.jp'")
+        conn31.commit()
+        prog2 = estimate_crawl_progress(conn31)
+        check("全件 done → completion_pct = 100.0",
+              prog2["completion_pct"] == 100.0, f"実際={prog2['completion_pct']}")
+        check("全件 done → remaining = 0",
+              prog2["remaining"] == 0, f"実際={prog2['remaining']}")
+
+        # 空DBの場合は 0% で割り算エラーなし
+        conn31.execute("DELETE FROM crawl_queue")
+        conn31.commit()
+        prog3 = estimate_crawl_progress(conn31)
+        check("空DB → completion_pct = 0.0 (ZeroDivision なし)",
+              prog3["completion_pct"] == 0.0, f"実際={prog3['completion_pct']}")
+
+        conn31.close()
+    finally:
+        for f in [tmp31, tmp31 + "-shm", tmp31 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
