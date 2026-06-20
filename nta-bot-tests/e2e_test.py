@@ -7,6 +7,7 @@ nta-bot E2E テスト
   3. リセットスクリプトのロジック (DB変更が正しく行われるか)
   4. watchdog の fetch_failed_permanent 除外ロジック
   5. fetch_html タプル戻り値の互換性チェック
+  6. watchdog の fetch_failed 自動 skip 機能
 """
 
 import asyncio
@@ -198,7 +199,7 @@ def reset_bad_domains(conn, bad_domains):
 
 
 def reset_stuck_watchdog(conn):
-    """watchdog の reset_stuck ロジック（fetch_failed は除外）"""
+    """watchdog の reset_stuck ロジック（fetch_failed は除外＆自動skip）"""
     n_pending  = conn.execute(
         "UPDATE crawl_queue SET status='pending' WHERE status='url_searching'"
     ).rowcount
@@ -209,8 +210,13 @@ def reset_stuck_watchdog(conn):
         "UPDATE crawl_queue SET status='url_found' "
         "WHERE status='error' AND (error IS NULL OR error NOT LIKE 'fetch_failed%')"
     ).rowcount
+    # fetch_failed を即座に skip に移動（無限リトライ防止）
+    n_skip = conn.execute(
+        "UPDATE crawl_queue SET status='skip', error='fetch_failed_permanent' "
+        "WHERE status='error' AND error LIKE 'fetch_failed%'"
+    ).rowcount
     conn.commit()
-    return n_pending, n_url_found, n_error
+    return n_pending, n_url_found, n_error, n_skip
 
 
 # ═══════════════════════════════════════════════════════════
@@ -351,12 +357,13 @@ def run_tests():
                       "error", 3, None, "timeout", None))
         conn.commit()
 
-        n_p, n_u, n_e = reset_stuck_watchdog(conn)
+        n_p, n_u, n_e, n_s = reset_stuck_watchdog(conn)
 
-        # fetch_failed_permanent は skip のまま
-        ff_status = conn.execute(
+        # fetch_failed_permanent は skip に移動済み
+        ff_row = conn.execute(
             "SELECT status FROM crawl_queue WHERE error='fetch_failed_permanent'"
-        ).fetchone()["status"]
+        ).fetchone()
+        ff_status = ff_row["status"] if ff_row else "not_found"
 
         check("url_searching → pending にリセットされる", n_p >= 1,
               f"件数={n_p}")
@@ -372,6 +379,67 @@ def run_tests():
         if os.path.exists(tmp):
             os.unlink(tmp)
         for f in [tmp + "-shm", tmp + "-wal"]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    # ── テスト 6: watchdog fetch_failed 自動 skip ───────────
+    print("\n▼ Test 6: watchdog fetch_failed 自動 skip")
+
+    tmp6 = tempfile.mktemp(suffix=".db")
+    try:
+        conn6 = sqlite3.connect(tmp6)
+        conn6.execute("PRAGMA journal_mode=WAL")
+        conn6.row_factory = sqlite3.Row
+        conn6.executescript("""
+            CREATE TABLE crawl_queue (
+                corporate_number TEXT PRIMARY KEY,
+                name TEXT, pref_name TEXT, city_name TEXT,
+                status TEXT, attempts INTEGER, hp_url TEXT,
+                error TEXT, last_attempt TEXT
+            );
+        """)
+
+        # fetch_failed が error に溜まっている状態を再現
+        test_data = [
+            ("A001", "fetch_failed error 1", "error", "fetch_failed"),
+            ("A002", "fetch_failed error 2", "error", "fetch_failed"),
+            ("A003", "通常 error（リトライ可）", "error", "timeout"),
+            ("A004", "通常 error（error=NULL）", "error", None),
+            ("A005", "url_searching スタック", "url_searching", None),
+        ]
+        for num, name, status, error in test_data:
+            conn6.execute(
+                "INSERT INTO crawl_queue VALUES (?,?,?,?,?,?,?,?,?)",
+                (num, name, "東京都", "千代田区", status, 2, None, error, None),
+            )
+        conn6.commit()
+
+        n_p, n_u, n_e, n_s = reset_stuck_watchdog(conn6)
+
+        # fetch_failed → skip に移動されているか
+        ff_rows = conn6.execute(
+            "SELECT status, error FROM crawl_queue WHERE corporate_number IN ('A001','A002')"
+        ).fetchall()
+        # 通常 error → url_found に昇格しているか
+        normal_rows = conn6.execute(
+            "SELECT status FROM crawl_queue WHERE corporate_number IN ('A003','A004')"
+        ).fetchall()
+
+        check("fetch_failed error が skip に移動される（自動skip）",
+              all(r["status"] == "skip" for r in ff_rows),
+              f"実際: {[(r['status'], r['error']) for r in ff_rows]}")
+        check("fetch_failed skip の error が fetch_failed_permanent になる",
+              all(r["error"] == "fetch_failed_permanent" for r in ff_rows),
+              f"実際: {[r['error'] for r in ff_rows]}")
+        check("自動skip件数が2件", n_s == 2, f"実際={n_s}")
+        check("通常 error は url_found に昇格する",
+              all(r["status"] == "url_found" for r in normal_rows),
+              f"実際: {[r['status'] for r in normal_rows]}")
+        check("url_searching は pending に戻る", n_p >= 1, f"件数={n_p}")
+
+        conn6.close()
+    finally:
+        for f in [tmp6, tmp6 + "-shm", tmp6 + "-wal"]:
             if os.path.exists(f):
                 os.unlink(f)
 
