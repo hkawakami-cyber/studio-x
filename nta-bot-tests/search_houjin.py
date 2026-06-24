@@ -20,42 +20,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NTA法人データ検索</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }
-header { background: #1a73e8; color: white; padding: 16px 24px; }
-header h1 { font-size: 20px; }
-header small { opacity: 0.8; font-size: 13px; }
-.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-.filters { background: white; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
-.filters h2 { font-size: 15px; margin-bottom: 12px; color: #555; }
-.filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.filter-grid label { font-size: 12px; color: #777; display: block; margin-bottom: 4px; }
-.filter-grid input, .filter-grid select {
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }}
+header {{ background: #1a73e8; color: white; padding: 16px 24px; }}
+header h1 {{ font-size: 20px; }}
+header small {{ opacity: 0.8; font-size: 13px; }}
+.container {{ max-width: 1400px; margin: 0 auto; padding: 20px; }}
+.filters {{ background: white; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+.filters h2 {{ font-size: 15px; margin-bottom: 12px; color: #555; }}
+.filter-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }}
+.filter-grid label {{ font-size: 12px; color: #777; display: block; margin-bottom: 4px; }}
+.filter-grid input, .filter-grid select {{
   width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px;
-}
-.buttons { display: flex; gap: 10px; margin-top: 16px; }
-.btn { padding: 9px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; }
-.btn-primary { background: #1a73e8; color: white; }
-.btn-secondary { background: #f1f3f4; color: #333; }
-.btn-green { background: #34a853; color: white; }
-.results { background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); overflow: hidden; }
-.results-header { padding: 16px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; justify-content: space-between; }
-.results-header h3 { font-size: 15px; }
-.count { color: #1a73e8; font-weight: 600; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { background: #f8f9fa; padding: 10px 12px; text-align: left; border-bottom: 2px solid #e0e0e0; font-size: 12px; color: #555; white-space: nowrap; position: sticky; top: 0; }
-td { padding: 9px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: top; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-tr:hover td { background: #f8f9fa; }
-a { color: #1a73e8; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.pagination { padding: 16px 20px; display: flex; gap: 8px; align-items: center; justify-content: center; border-top: 1px solid #eee; }
-.pagination a { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; color: #333; font-size: 13px; }
-.pagination a.active { background: #1a73e8; color: white; border-color: #1a73e8; }
-.pagination a:hover:not(.active) { background: #f5f5f5; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
-.badge-done { background: #e6f4ea; color: #1e8e3e; }
-.badge-error { background: #fce8e6; color: #d93025; }
-.no-results { padding: 40px; text-align: center; color: #999; }
+}}
+.buttons {{ display: flex; gap: 10px; margin-top: 16px; }}
+.btn {{ padding: 9px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; }}
+.btn-primary {{ background: #1a73e8; color: white; }}
+.btn-secondary {{ background: #f1f3f4; color: #333; }}
+.btn-green {{ background: #34a853; color: white; }}
+.results {{ background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); overflow: hidden; }}
+.results-header {{ padding: 16px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; justify-content: space-between; }}
+.results-header h3 {{ font-size: 15px; }}
+.count {{ color: #1a73e8; font-weight: 600; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+th {{ background: #f8f9fa; padding: 10px 12px; text-align: left; border-bottom: 2px solid #e0e0e0; font-size: 12px; color: #555; white-space: nowrap; position: sticky; top: 0; }}
+td {{ padding: 9px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: top; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+tr:hover td {{ background: #f8f9fa; }}
+a {{ color: #1a73e8; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+.pagination {{ padding: 16px 20px; display: flex; gap: 8px; align-items: center; justify-content: center; border-top: 1px solid #eee; }}
+.pagination a {{ padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; color: #333; font-size: 13px; }}
+.pagination a.active {{ background: #1a73e8; color: white; border-color: #1a73e8; }}
+.pagination a:hover:not(.active) {{ background: #f5f5f5; }}
+.badge {{ display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }}
+.badge-done {{ background: #e6f4ea; color: #1e8e3e; }}
+.badge-error {{ background: #fce8e6; color: #d93025; }}
+.no-results {{ padding: 40px; text-align: center; color: #999; }}
 </style>
 </head>
 <body>
