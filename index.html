@@ -4,463 +4,160 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Studio-X | Thinking Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-
   :root {
-    --navy: #12384C;
-    --teal: #79BFA8;
-    --soft-cyan: #A7D6CF;
-    --gold: #AE953B;
-    --bg: #F5F7F8;
-    --border: #E2E8EF;
-    --body: #1a1a1a;
-    --muted: #64748B;
-    --white: #ffffff;
-    --ann-blue: #163F9A;
-    --orange: #D47A2A;
+    --navy: #12384C; --teal: #79BFA8; --soft-cyan: #A7D6CF;
+    --bg: #F5F7F8; --border: #E2E8EF; --body: #1a1a1a;
+    --muted: #64748B; --white: #ffffff; --orange: #D47A2A;
+    --success: #2e7d5e; --error: #c0392b;
   }
+  body { font-family:'Noto Sans JP',sans-serif; background:var(--bg); color:var(--body); height:100vh; display:flex; flex-direction:column; overflow:hidden; }
 
-  body {
-    font-family: 'Noto Sans JP', sans-serif;
-    background: var(--bg);
-    color: var(--body);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
+  header { background:var(--navy); padding:0 1.5rem; height:52px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+  .logo { color:var(--white); font-size:16px; font-weight:700; letter-spacing:.05em; display:flex; align-items:center; gap:8px; }
+  .logo-accent { color:var(--teal); }
 
-  /* Header */
-  header {
-    background: var(--navy);
-    padding: 0 1.5rem;
-    height: 52px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-  }
-  .logo {
-    color: var(--white);
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .logo-accent { color: var(--teal); }
-  .header-sub { color: var(--soft-cyan); font-size: 12px; }
+  #api-bar { background:#fff8e6; border-bottom:1px solid #f0d88a; padding:8px 1.5rem; display:flex; align-items:center; gap:12px; flex-shrink:0; }
+  #api-bar label { font-size:12px; color:var(--muted); white-space:nowrap; }
+  #api-key-input { flex:1; border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12px; font-family:monospace; background:var(--white); max-width:420px; }
+  #api-key-input:focus { outline:2px solid var(--teal); }
+  .save-btn { background:var(--teal); color:var(--white); border:none; border-radius:6px; padding:5px 14px; font-size:12px; cursor:pointer; font-family:'Noto Sans JP',sans-serif; font-weight:500; transition:background .15s; }
+  .save-btn:hover { background:#5fa898; }
+  #api-status { font-size:12px; color:var(--muted); }
 
-  /* API Key Bar */
-  #api-bar {
-    background: #fff8e6;
-    border-bottom: 1px solid #f0d88a;
-    padding: 8px 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-shrink: 0;
-  }
-  #api-bar label { font-size: 12px; color: var(--muted); white-space: nowrap; }
-  #api-key-input {
-    flex: 1;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 12px;
-    font-family: monospace;
-    background: var(--white);
-    max-width: 420px;
-  }
-  #api-key-input:focus { outline: 2px solid var(--teal); }
-  .save-btn {
-    background: var(--teal);
-    color: var(--white);
-    border: none;
-    border-radius: 6px;
-    padding: 5px 14px;
-    font-size: 12px;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    font-weight: 500;
-  }
-  .save-btn:hover { background: #5fa898; }
-  #api-status { font-size: 12px; color: var(--muted); }
+  .main { display:grid; grid-template-columns:260px 1fr 1fr; flex:1; overflow:hidden; }
+  .pane { border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
+  .pane:last-child { border-right:none; }
+  .pane-header { background:var(--white); border-bottom:1px solid var(--border); padding:10px 14px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+  .pane-title { font-size:11px; font-weight:700; color:var(--navy); letter-spacing:.08em; text-transform:uppercase; }
+  .pane-body { flex:1; overflow-y:auto; padding:12px; }
 
-  /* Main Layout */
-  .main {
-    display: grid;
-    grid-template-columns: 260px 1fr 1fr;
-    gap: 0;
-    flex: 1;
-    overflow: hidden;
-  }
+  .search-box { width:100%; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:12px; font-family:'Noto Sans JP',sans-serif; background:var(--white); margin-bottom:8px; color:var(--body); }
+  .search-box:focus { outline:2px solid var(--teal); }
 
-  /* Pane共通 */
-  .pane {
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .pane:last-child { border-right: none; }
-  .pane-header {
-    background: var(--white);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-  }
-  .pane-title {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--navy);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-  .pane-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-  }
+  .memo-card { background:var(--white); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px; cursor:pointer; transition:border-color .15s,box-shadow .15s; position:relative; }
+  .memo-card:hover { border-color:var(--teal); box-shadow:0 1px 4px rgba(121,191,168,.15); }
+  .memo-card.active { border-color:var(--teal); border-width:2px; background:#f0faf7; }
+  .memo-card-title { font-size:12px; font-weight:700; color:var(--navy); margin-bottom:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding-right:20px; }
+  .memo-card-preview { font-size:11px; color:var(--muted); overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .memo-card-meta { display:flex; align-items:center; gap:6px; margin-top:5px; }
+  .memo-date { font-size:10px; color:#aaa; }
+  .delete-btn { position:absolute; top:8px; right:8px; background:none; border:none; color:#ccc; cursor:pointer; font-size:14px; line-height:1; padding:2px; transition:color .15s; }
+  .delete-btn:hover { color:var(--error); }
+  .new-memo-btn { width:100%; background:var(--navy); color:var(--white); border:none; border-radius:8px; padding:9px; font-size:13px; font-weight:700; cursor:pointer; margin-bottom:8px; font-family:'Noto Sans JP',sans-serif; transition:background .15s; }
+  .new-memo-btn:hover { background:#1a4d65; }
 
-  /* Left Pane - Inbox */
-  .memo-card {
-    background: var(--white);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    cursor: pointer;
-    transition: border-color 0.15s, box-shadow 0.15s;
-    position: relative;
-  }
-  .memo-card:hover { border-color: var(--teal); box-shadow: 0 1px 4px rgba(121,191,168,0.15); }
-  .memo-card.active { border-color: var(--teal); border-width: 2px; background: #f0faf7; }
-  .memo-card-title { font-size: 12px; font-weight: 700; color: var(--navy); margin-bottom: 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .memo-card-preview { font-size: 11px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .memo-card-meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
-  .memo-date { font-size: 10px; color: #aaa; }
-  .memo-fire { font-size: 11px; }
-  .delete-btn {
-    position: absolute;
-    top: 8px; right: 8px;
-    background: none;
-    border: none;
-    color: #ccc;
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    padding: 2px;
-  }
-  .delete-btn:hover { color: #e74c3c; }
-  .new-memo-btn {
-    width: 100%;
-    background: var(--navy);
-    color: var(--white);
-    border: none;
-    border-radius: 8px;
-    padding: 9px;
-    font-size: 13px;
-    font-weight: 700;
-    cursor: pointer;
-    margin-bottom: 10px;
-    font-family: 'Noto Sans JP', sans-serif;
-    transition: background 0.15s;
-  }
-  .new-memo-btn:hover { background: #1a4d65; }
+  .workbench-body { padding:14px; display:flex; flex-direction:column; gap:12px; overflow-y:auto; flex:1; }
+  .textarea-wrap { position:relative; }
+  textarea#memo-input { width:100%; border:1px solid var(--border); border-radius:8px; padding:10px 12px 28px; font-size:13px; font-family:'Noto Sans JP',sans-serif; resize:vertical; min-height:140px; color:var(--body); line-height:1.7; background:var(--white); transition:border-color .15s; }
+  textarea#memo-input:focus { outline:2px solid var(--teal); border-color:transparent; }
+  .textarea-footer { position:absolute; bottom:8px; right:10px; font-size:10px; color:#bbb; pointer-events:none; display:flex; gap:10px; }
+  .autosave-label { color:var(--teal); opacity:0; transition:opacity .4s; }
+  .autosave-label.on { opacity:1; }
 
-  /* Center Pane - Workbench */
-  .workbench-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; flex: 1; }
-  textarea#memo-input {
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 13px;
-    font-family: 'Noto Sans JP', sans-serif;
-    resize: vertical;
-    min-height: 140px;
-    color: var(--body);
-    line-height: 1.7;
-    background: var(--white);
-  }
-  textarea#memo-input:focus { outline: 2px solid var(--teal); border-color: transparent; }
+  .control-section { background:var(--white); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .control-label { font-size:11px; font-weight:700; color:var(--navy); margin-bottom:8px; letter-spacing:.05em; }
 
-  .control-section {
-    background: var(--white);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-  }
-  .control-label {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--navy);
-    margin-bottom: 8px;
-    letter-spacing: 0.05em;
-  }
+  .slider-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .slider-name { font-size:11px; color:var(--muted); width:44px; flex-shrink:0; }
+  .slider-row input[type=range] { flex:1; accent-color:var(--teal); height:4px; cursor:pointer; }
+  .slider-val { font-size:10px; color:var(--teal); font-weight:700; width:52px; text-align:right; }
+  .slider-labels { display:flex; justify-content:space-between; font-size:10px; color:#aaa; margin-top:-2px; margin-bottom:4px; }
 
-  /* Sliders */
-  .slider-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .slider-name { font-size: 11px; color: var(--muted); width: 44px; flex-shrink: 0; }
-  .slider-row input[type=range] {
-    flex: 1;
-    accent-color: var(--teal);
-    height: 4px;
-    cursor: pointer;
-  }
-  .slider-labels { display: flex; justify-content: space-between; font-size: 10px; color: #aaa; margin-top: -4px; margin-bottom: 6px; }
+  .format-grid,.struct-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .format-btn,.struct-btn { border:1px solid var(--border); background:var(--white); border-radius:6px; padding:7px 6px; font-size:11px; cursor:pointer; font-family:'Noto Sans JP',sans-serif; color:var(--muted); font-weight:500; transition:all .15s; text-align:center; }
+  .format-btn.active { background:var(--navy); color:var(--white); border-color:var(--navy); }
+  .struct-btn.active { background:var(--teal); color:var(--white); border-color:var(--teal); }
+  .format-btn:hover:not(.active),.struct-btn:hover:not(.active) { border-color:var(--teal); color:var(--navy); }
 
-  /* Format selector */
-  .format-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-  .format-btn {
-    border: 1px solid var(--border);
-    background: var(--white);
-    border-radius: 6px;
-    padding: 7px 6px;
-    font-size: 11px;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    color: var(--muted);
-    font-weight: 500;
-    transition: all 0.15s;
-    text-align: center;
-  }
-  .format-btn.active { background: var(--navy); color: var(--white); border-color: var(--navy); }
-  .format-btn:hover:not(.active) { border-color: var(--teal); color: var(--navy); }
+  .save-memo-btn { width:100%; background:var(--white); color:var(--navy); border:1px solid var(--navy); border-radius:8px; padding:8px; font-size:13px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; transition:all .15s; }
+  .save-memo-btn:hover { background:var(--navy); color:var(--white); }
+  .convert-btn { width:100%; background:var(--orange); color:var(--white); border:none; border-radius:8px; padding:13px; font-size:15px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; transition:background .15s,transform .1s; letter-spacing:.03em; display:flex; align-items:center; justify-content:center; gap:8px; }
+  .convert-btn:hover:not(:disabled) { background:#b8661e; }
+  .convert-btn:active:not(:disabled) { transform:scale(.99); }
+  .convert-btn:disabled { background:#ccc; cursor:not-allowed; }
+  .shortcut-hint { font-size:10px; opacity:.65; font-weight:400; }
 
-  /* Structure selector */
-  .struct-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-  .struct-btn {
-    border: 1px solid var(--border);
-    background: var(--white);
-    border-radius: 6px;
-    padding: 7px 6px;
-    font-size: 11px;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    color: var(--muted);
-    font-weight: 500;
-    transition: all 0.15s;
-    text-align: center;
-  }
-  .struct-btn.active { background: var(--teal); color: var(--white); border-color: var(--teal); }
-  .struct-btn:hover:not(.active) { border-color: var(--teal); color: var(--navy); }
+  .tab-bar { display:flex; border-bottom:1px solid var(--border); background:var(--white); flex-shrink:0; }
+  .tab-btn { flex:1; border:none; background:none; padding:10px 6px; font-size:11px; font-weight:700; cursor:pointer; color:var(--muted); font-family:'Noto Sans JP',sans-serif; border-bottom:2px solid transparent; transition:all .15s; letter-spacing:.03em; }
+  .tab-btn.active { color:var(--navy); border-bottom-color:var(--teal); }
+  .tab-btn:hover:not(.active) { color:var(--navy); }
 
-  /* Convert Button */
-  .convert-btn {
-    width: 100%;
-    background: var(--orange);
-    color: var(--white);
-    border: none;
-    border-radius: 8px;
-    padding: 13px;
-    font-size: 15px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    transition: background 0.15s, transform 0.1s;
-    letter-spacing: 0.03em;
-  }
-  .convert-btn:hover { background: #b8661e; }
-  .convert-btn:active { transform: scale(0.99); }
-  .convert-btn:disabled { background: #ccc; cursor: not-allowed; }
+  .stream-bar { padding:7px 14px; background:#f0faf7; border-bottom:1px solid #c8e8de; font-size:11px; color:var(--teal); display:none; align-items:center; gap:8px; flex-shrink:0; }
+  .stream-bar.on { display:flex; }
+  .stream-dot { width:6px; height:6px; border-radius:50%; background:var(--teal); animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
 
-  /* Save memo btn */
-  .save-memo-btn {
-    width: 100%;
-    background: var(--white);
-    color: var(--navy);
-    border: 1px solid var(--navy);
-    border-radius: 8px;
-    padding: 8px;
-    font-size: 13px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    transition: all 0.15s;
-  }
-  .save-memo-btn:hover { background: var(--navy); color: var(--white); }
+  .output-pane { display:none; flex:1; flex-direction:column; overflow:hidden; }
+  .output-pane.active { display:flex; }
+  .output-frame { flex:1; overflow-y:auto; padding:14px; }
 
-  /* Right Pane - Asset */
-  .tab-bar {
-    display: flex;
-    border-bottom: 1px solid var(--border);
-    background: var(--white);
-    flex-shrink: 0;
-  }
-  .tab-btn {
-    flex: 1;
-    border: none;
-    background: none;
-    padding: 10px 6px;
-    font-size: 11px;
-    font-weight: 700;
-    cursor: pointer;
-    color: var(--muted);
-    font-family: 'Noto Sans JP', sans-serif;
-    border-bottom: 2px solid transparent;
-    transition: all 0.15s;
-    letter-spacing: 0.03em;
-  }
-  .tab-btn.active { color: var(--navy); border-bottom-color: var(--teal); }
-  .tab-btn:hover:not(.active) { color: var(--navy); }
+  .x-preview { background:var(--white); border:1px solid var(--border); border-radius:12px; padding:14px; max-width:480px; margin:0 auto; }
+  .x-avatar { width:36px; height:36px; border-radius:50%; background:var(--teal); display:flex; align-items:center; justify-content:center; color:var(--white); font-weight:700; font-size:14px; flex-shrink:0; }
+  .x-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .x-name { font-size:13px; font-weight:700; }
+  .x-handle { font-size:12px; color:var(--muted); }
+  .x-content { font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+  .x-count { text-align:right; font-size:11px; color:var(--muted); margin-top:8px; }
+  .x-count.over { color:var(--error); font-weight:700; }
+  .x-thread-warn { margin-top:6px; font-size:11px; color:var(--orange); background:#fff7ee; border-radius:4px; padding:4px 8px; }
 
-  .output-pane { display: none; flex: 1; flex-direction: column; overflow: hidden; }
-  .output-pane.active { display: flex; }
+  .note-preview { background:var(--white); border:1px solid var(--border); border-radius:8px; padding:20px; font-size:14px; line-height:1.9; }
+  .note-preview h1 { font-size:20px; font-weight:700; margin-bottom:16px; color:var(--navy); line-height:1.4; }
+  .note-preview h2 { font-size:15px; font-weight:700; margin:18px 0 8px; color:var(--navy); border-left:3px solid var(--teal); padding-left:8px; }
+  .note-preview h3 { font-size:13px; font-weight:700; margin:12px 0 6px; color:var(--navy); }
+  .note-preview p { margin-bottom:10px; }
+  .note-preview ul,.note-preview ol { margin:6px 0 10px 20px; }
+  .note-preview li { margin-bottom:4px; }
+  .note-preview blockquote { border-left:3px solid var(--teal); padding:8px 12px; margin:12px 0; background:#f0faf7; color:var(--muted); font-style:italic; border-radius:0 4px 4px 0; }
+  .note-preview code { background:#f1f5f9; padding:1px 5px; border-radius:3px; font-family:monospace; font-size:12px; }
+  .note-preview pre { background:#1e1e2e; color:#cdd6f4; padding:12px; border-radius:6px; overflow-x:auto; margin:12px 0; }
+  .note-preview pre code { background:none; color:inherit; padding:0; }
+  .note-preview hr { border:none; border-top:1px solid var(--border); margin:14px 0; }
+  .note-preview strong { font-weight:700; color:var(--navy); }
 
-  .output-frame {
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px;
-  }
+  .md-preview { background:#1e1e2e; border-radius:8px; padding:14px; font-family:'Courier New',monospace; font-size:12px; color:#cdd6f4; line-height:1.7; white-space:pre-wrap; word-break:break-all; min-height:100px; }
 
-  /* X Preview */
-  .x-preview {
-    background: var(--white);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px;
-    max-width: 480px;
-    margin: 0 auto;
-  }
-  .x-avatar {
-    width: 36px; height: 36px;
-    border-radius: 50%;
-    background: var(--teal);
-    display: flex; align-items: center; justify-content: center;
-    color: var(--white); font-weight: 700; font-size: 14px;
-    flex-shrink: 0;
-  }
-  .x-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-  .x-name { font-size: 13px; font-weight: 700; }
-  .x-handle { font-size: 12px; color: var(--muted); }
-  .x-content { font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
-  .x-char-count { text-align: right; font-size: 11px; color: var(--muted); margin-top: 8px; }
-  .x-char-count.over { color: #e74c3c; }
+  .copy-bar { padding:10px 14px; background:var(--white); border-top:1px solid var(--border); flex-shrink:0; display:flex; gap:8px; }
+  .copy-btn { flex:1; background:var(--navy); color:var(--white); border:none; border-radius:6px; padding:8px; font-size:12px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; transition:background .15s; }
+  .copy-btn:hover { background:#1a4d65; }
+  .copy-btn.done { background:var(--teal); }
+  .regen-btn { background:var(--white); color:var(--orange); border:1px solid var(--orange); border-radius:6px; padding:8px 12px; font-size:12px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; transition:all .15s; white-space:nowrap; display:none; }
+  .regen-btn.on { display:block; }
+  .regen-btn:hover { background:var(--orange); color:var(--white); }
+  .regen-btn:disabled { border-color:#ccc; color:#ccc; cursor:not-allowed; background:var(--white); }
 
-  /* Note Preview */
-  .note-preview {
-    background: var(--white);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px;
-    font-size: 14px;
-    line-height: 1.9;
-  }
-  .note-preview h1 { font-size: 18px; font-weight: 700; margin-bottom: 14px; color: var(--navy); }
-  .note-preview h2 { font-size: 15px; font-weight: 700; margin: 14px 0 6px; color: var(--navy); }
-  .note-preview p { margin-bottom: 10px; }
+  .loading-overlay { position:fixed; inset:0; background:rgba(18,56,76,.5); display:none; align-items:center; justify-content:center; z-index:999; }
+  .loading-overlay.on { display:flex; }
+  .loading-box { background:var(--white); border-radius:12px; padding:28px 36px; text-align:center; }
+  .spinner { width:36px; height:36px; border:3px solid var(--border); border-top-color:var(--teal); border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 12px; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .loading-text { font-size:13px; color:var(--muted); }
 
-  /* Markdown Preview */
-  .md-preview {
-    background: #1e1e2e;
-    border-radius: 8px;
-    padding: 14px;
-    font-family: 'Courier New', monospace;
-    font-size: 12px;
-    color: #cdd6f4;
-    line-height: 1.7;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--navy); color:var(--white); padding:10px 20px; border-radius:20px; font-size:13px; z-index:1000; opacity:0; transition:opacity .3s; pointer-events:none; white-space:nowrap; }
+  .toast.on { opacity:1; }
 
-  /* Copy buttons */
-  .copy-bar {
-    padding: 10px 14px;
-    background: var(--white);
-    border-top: 1px solid var(--border);
-    flex-shrink: 0;
-    display: flex;
-    gap: 8px;
-  }
-  .copy-btn {
-    flex: 1;
-    background: var(--navy);
-    color: var(--white);
-    border: none;
-    border-radius: 6px;
-    padding: 8px;
-    font-size: 12px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: 'Noto Sans JP', sans-serif;
-    transition: background 0.15s;
-  }
-  .copy-btn:hover { background: #1a4d65; }
-  .copy-btn.copied { background: var(--teal); }
+  .empty-state { display:flex; align-items:center; justify-content:center; min-height:120px; flex-direction:column; gap:8px; color:var(--muted); font-size:13px; }
+  .empty-icon { font-size:32px; opacity:.3; }
 
-  /* Loading */
-  .loading-overlay {
-    position: fixed; inset: 0;
-    background: rgba(18,56,76,0.5);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 999;
-    display: none;
-  }
-  .loading-box {
-    background: var(--white);
-    border-radius: 12px;
-    padding: 28px 36px;
-    text-align: center;
-  }
-  .spinner {
-    width: 36px; height: 36px;
-    border: 3px solid var(--border);
-    border-top-color: var(--teal);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin: 0 auto 12px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .loading-text { font-size: 13px; color: var(--muted); }
-
-  /* Toast */
-  .toast {
-    position: fixed;
-    bottom: 24px; left: 50%; transform: translateX(-50%);
-    background: var(--navy);
-    color: var(--white);
-    padding: 10px 20px;
-    border-radius: 20px;
-    font-size: 13px;
-    z-index: 1000;
-    opacity: 0;
-    transition: opacity 0.3s;
-    pointer-events: none;
-  }
-  .toast.show { opacity: 1; }
-
-  /* Empty state */
-  .empty-state {
-    display: flex; align-items: center; justify-content: center;
-    height: 100%; flex-direction: column; gap: 8px;
-    color: var(--muted); font-size: 13px;
-  }
-  .empty-icon { font-size: 32px; opacity: 0.3; }
-
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  ::-webkit-scrollbar { width:4px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="logo">
-    <span class="logo-accent">◆</span> Studio-X <span style="color:var(--soft-cyan);font-weight:400;font-size:12px;margin-left:4px">Thinking Studio</span>
+  <div class="logo"><span class="logo-accent">◆</span> Studio-X <span style="color:var(--soft-cyan);font-weight:400;font-size:12px;margin-left:4px">Thinking Studio</span></div>
+  <div style="display:flex;align-items:center;gap:16px">
+    <span style="color:rgba(255,255,255,.35);font-size:11px" id="kbd-hint"></span>
+    <span style="color:var(--soft-cyan);font-size:12px">混沌（メモ）を資産（アウトプット）へ</span>
   </div>
-  <div class="header-sub">混沌（メモ）を資産（アウトプット）へ</div>
 </header>
 
-<!-- API Key Bar -->
 <div id="api-bar">
   <label>🔑 Claude API Key</label>
   <input type="password" id="api-key-input" placeholder="sk-ant-api03-..." />
@@ -478,27 +175,32 @@
     </div>
     <div class="pane-body">
       <button class="new-memo-btn" onclick="newMemo()">＋ 新しいメモ</button>
+      <input type="search" class="search-box" id="memo-search" placeholder="🔍 メモを検索..." oninput="renderMemos()" />
       <div id="memo-list"></div>
     </div>
   </div>
 
   <!-- CENTER: Workbench -->
-  <div class="pane" style="border-right:1px solid var(--border)">
+  <div class="pane">
     <div class="pane-header">
       <span class="pane-title">⚙️ Workbench</span>
+      <span class="autosave-label" id="autosave-label">✓ 自動保存</span>
     </div>
     <div class="workbench-body">
-      <textarea id="memo-input" placeholder="思考・アイデア・気づきをここに入力...&#10;&#10;例）今日の商談で気づいたこと、読んだ記事の感想、伝えたいメッセージ"></textarea>
+      <div class="textarea-wrap">
+        <textarea id="memo-input" placeholder="思考・アイデア・気づきをここに入力...&#10;&#10;例）今日の商談で気づいたこと、読んだ記事の感想、伝えたいメッセージ" oninput="onInput()"></textarea>
+        <div class="textarea-footer"><span id="char-count">0文字</span></div>
+      </div>
 
       <div class="control-section">
         <div class="control-label">📐 構造化フレームワーク</div>
         <div class="struct-grid">
-          <button class="struct-btn active" onclick="selectStruct(this,'PREP')">PREP法</button>
-          <button class="struct-btn" onclick="selectStruct(this,'SDS')">SDS法</button>
-          <button class="struct-btn" onclick="selectStruct(this,'WHY')">WHY→HOW</button>
-          <button class="struct-btn" onclick="selectStruct(this,'STAR')">STAR法</button>
-          <button class="struct-btn" onclick="selectStruct(this,'問題解決')">問題解決型</button>
-          <button class="struct-btn" onclick="selectStruct(this,'自由')">自由変換</button>
+          <button class="struct-btn active" onclick="selStruct(this,'PREP')">PREP法</button>
+          <button class="struct-btn" onclick="selStruct(this,'SDS')">SDS法</button>
+          <button class="struct-btn" onclick="selStruct(this,'WHY')">WHY→HOW</button>
+          <button class="struct-btn" onclick="selStruct(this,'STAR')">STAR法</button>
+          <button class="struct-btn" onclick="selStruct(this,'問題解決')">問題解決型</button>
+          <button class="struct-btn" onclick="selStruct(this,'自由')">自由変換</button>
         </div>
       </div>
 
@@ -506,356 +208,464 @@
         <div class="control-label">🎛️ マジック・スライダー</div>
         <div class="slider-row">
           <span class="slider-name">トーン</span>
-          <input type="range" id="tone" min="1" max="5" value="3" />
+          <input type="range" id="sl-tone" min="1" max="5" value="3" oninput="updSlider()" />
+          <span class="slider-val" id="sv-tone">普通</span>
         </div>
         <div class="slider-labels"><span>丁寧</span><span>ラフ</span></div>
         <div class="slider-row">
           <span class="slider-name">粒度</span>
-          <input type="range" id="length" min="1" max="5" value="3" />
+          <input type="range" id="sl-len" min="1" max="5" value="3" oninput="updSlider()" />
+          <span class="slider-val" id="sv-len">普通</span>
         </div>
         <div class="slider-labels"><span>短い</span><span>長い</span></div>
       </div>
 
       <div class="control-section">
-        <div class="control-label">📤 出力フォーマット</div>
+        <div class="control-label">📤 出力フォーマット <span style="font-weight:400;color:var(--muted);font-size:10px">（複数選択可）</span></div>
         <div class="format-grid">
-          <button class="format-btn active" onclick="selectFormat(this,'x')">X（ポスト）</button>
-          <button class="format-btn" onclick="selectFormat(this,'note')">note記事</button>
-          <button class="format-btn active" onclick="selectFormat(this,'md')">Markdown</button>
+          <button class="format-btn active" onclick="selFormat(this,'x')">X（ポスト）</button>
+          <button class="format-btn" onclick="selFormat(this,'note')">note記事</button>
+          <button class="format-btn active" onclick="selFormat(this,'md')">Markdown</button>
         </div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px">複数選択可</div>
       </div>
 
       <button class="save-memo-btn" onclick="saveMemo()">💾 メモを保存</button>
-      <button class="convert-btn" onclick="convertMemo()" id="convert-btn">✦ 変換する</button>
+      <button class="convert-btn" id="convert-btn" onclick="doConvert()">
+        <span id="convert-label">✦ 変換する</span>
+        <span class="shortcut-hint" id="convert-hint"></span>
+      </button>
     </div>
   </div>
 
   <!-- RIGHT: Asset -->
   <div class="pane" style="display:flex;flex-direction:column">
     <div class="tab-bar">
-      <button class="tab-btn active" onclick="switchTab(this,'tab-x')">X</button>
-      <button class="tab-btn" onclick="switchTab(this,'tab-note')">note</button>
-      <button class="tab-btn" onclick="switchTab(this,'tab-md')">Markdown</button>
+      <button class="tab-btn active" id="tab-btn-x" onclick="switchTab(this,'tab-x')">X</button>
+      <button class="tab-btn" id="tab-btn-note" onclick="switchTab(this,'tab-note')">note</button>
+      <button class="tab-btn" id="tab-btn-md" onclick="switchTab(this,'tab-md')">Markdown</button>
     </div>
+    <div class="stream-bar" id="stream-bar"><div class="stream-dot"></div><span id="stream-txt">AIが生成中...</span></div>
 
-    <!-- X tab -->
     <div id="tab-x" class="output-pane active">
-      <div class="output-frame">
-        <div class="x-preview" id="x-preview">
-          <div class="empty-state">
-            <div class="empty-icon">✦</div>
-            <div>変換するとここに表示されます</div>
-          </div>
-        </div>
-      </div>
-      <div class="copy-bar">
-        <button class="copy-btn" onclick="copyOutput('x')">📋 コピー</button>
-      </div>
+      <div class="output-frame"><div id="x-preview" class="x-preview"><div class="empty-state"><div class="empty-icon">✦</div><div>変換するとここに表示されます</div></div></div></div>
+      <div class="copy-bar"><button class="copy-btn" onclick="copyOut('x')">📋 コピー</button><button class="regen-btn" id="regen-x" onclick="doConvert()">↺ 再生成</button></div>
     </div>
 
-    <!-- note tab -->
     <div id="tab-note" class="output-pane">
-      <div class="output-frame">
-        <div class="note-preview" id="note-preview">
-          <div class="empty-state">
-            <div class="empty-icon">✦</div>
-            <div>変換するとここに表示されます</div>
-          </div>
-        </div>
-      </div>
-      <div class="copy-bar">
-        <button class="copy-btn" onclick="copyOutput('note')">📋 コピー</button>
-      </div>
+      <div class="output-frame"><div id="note-preview" class="note-preview"><div class="empty-state"><div class="empty-icon">✦</div><div>変換するとここに表示されます</div></div></div></div>
+      <div class="copy-bar"><button class="copy-btn" onclick="copyOut('note')">📋 コピー</button><button class="regen-btn" id="regen-note" onclick="doConvert()">↺ 再生成</button></div>
     </div>
 
-    <!-- Markdown tab -->
     <div id="tab-md" class="output-pane">
-      <div class="output-frame">
-        <div class="md-preview" id="md-preview">変換するとここに表示されます</div>
-      </div>
-      <div class="copy-bar">
-        <button class="copy-btn" onclick="copyOutput('md')">📋 コピー</button>
-      </div>
+      <div class="output-frame"><div id="md-preview" class="md-preview">変換するとここに表示されます</div></div>
+      <div class="copy-bar"><button class="copy-btn" onclick="copyOut('md')">📋 コピー</button><button class="regen-btn" id="regen-md" onclick="doConvert()">↺ 再生成</button></div>
     </div>
   </div>
 </div>
 
-<!-- Loading -->
-<div class="loading-overlay" id="loading">
-  <div class="loading-box">
-    <div class="spinner"></div>
-    <div class="loading-text">AIが変換中...</div>
-  </div>
-</div>
-
-<!-- Toast -->
+<div class="loading-overlay" id="loading"><div class="loading-box"><div class="spinner"></div><div class="loading-text" id="loading-text">AIに接続中...</div></div></div>
 <div class="toast" id="toast"></div>
 
 <script>
-  // ===== STATE =====
-  let memos = JSON.parse(localStorage.getItem('sx-memos') || '[]');
-  let currentMemoId = null;
-  let selectedStruct = 'PREP';
-  let selectedFormats = new Set(['x', 'md']);
-  let outputs = { x: '', note: '', md: '' };
+// ===== STATE =====
+let memos = JSON.parse(localStorage.getItem('sx-memos') || '[]');
+let currentId = null;
+let selStruct_ = 'PREP';
+let selFormats = new Set(['x','md']);
+let outputs = {x:'',note:'',md:''};
+let saveTimer = null;
+let converting = false;
 
-  // ===== API KEY =====
-  function saveApiKey() {
-    const key = document.getElementById('api-key-input').value.trim();
-    if (!key.startsWith('sk-ant')) {
-      showToast('❌ APIキーの形式が違います（sk-ant...で始まるもの）');
-      return;
-    }
-    localStorage.setItem('sx-apikey', key);
-    document.getElementById('api-status').textContent = '✅ 設定済み';
-    document.getElementById('api-status').style.color = '#2e7d5e';
-    showToast('✅ APIキーを保存しました');
-  }
+const TONE_LABELS = ['丁寧','やや丁寧','普通','ややラフ','ラフ'];
+const LEN_LABELS  = ['短い','やや短い','普通','やや長い','長い'];
+const FW_DESC = {
+  PREP:'結論→理由→具体例→再結論',
+  SDS:'概要→詳細→まとめ',
+  WHY:'なぜ→どうやって→何を',
+  STAR:'状況→課題→行動→結果',
+  '問題解決':'問題→原因→解決策→行動',
+  '自由':''
+};
 
-  function loadApiKey() {
-    const key = localStorage.getItem('sx-apikey');
-    if (key) {
-      document.getElementById('api-key-input').value = key;
-      document.getElementById('api-status').textContent = '✅ 設定済み';
-      document.getElementById('api-status').style.color = '#2e7d5e';
-    }
-  }
-
-  // ===== MEMO =====
-  function newMemo() {
-    currentMemoId = null;
-    document.getElementById('memo-input').value = '';
-    document.querySelectorAll('.memo-card').forEach(c => c.classList.remove('active'));
-  }
-
-  function saveMemo() {
-    const text = document.getElementById('memo-input').value.trim();
-    if (!text) { showToast('⚠️ メモが空です'); return; }
-    const title = text.split('\n')[0].slice(0, 30) || '無題のメモ';
-    const now = new Date();
-    if (currentMemoId) {
-      const idx = memos.findIndex(m => m.id === currentMemoId);
-      if (idx > -1) { memos[idx].text = text; memos[idx].title = title; }
-    } else {
-      const memo = { id: Date.now().toString(), text, title, createdAt: now.toISOString() };
-      memos.unshift(memo);
-      currentMemoId = memo.id;
-    }
-    localStorage.setItem('sx-memos', JSON.stringify(memos));
-    renderMemos();
-    showToast('💾 保存しました');
-  }
-
-  function loadMemo(id) {
-    const memo = memos.find(m => m.id === id);
-    if (!memo) return;
-    currentMemoId = id;
-    document.getElementById('memo-input').value = memo.text;
-    document.querySelectorAll('.memo-card').forEach(c => {
-      c.classList.toggle('active', c.dataset.id === id);
-    });
-  }
-
-  function deleteMemo(id, e) {
-    e.stopPropagation();
-    memos = memos.filter(m => m.id !== id);
-    localStorage.setItem('sx-memos', JSON.stringify(memos));
-    if (currentMemoId === id) { currentMemoId = null; document.getElementById('memo-input').value = ''; }
-    renderMemos();
-    showToast('🗑️ 削除しました');
-  }
-
-  function renderMemos() {
-    const list = document.getElementById('memo-list');
-    document.getElementById('memo-count').textContent = memos.length + '件';
-    if (!memos.length) {
-      list.innerHTML = '<div class="empty-state" style="height:auto;padding:20px 0"><div class="empty-icon">📝</div><div>メモがありません</div></div>';
-      return;
-    }
-    const now = Date.now();
-    list.innerHTML = memos.map(m => {
-      const age = (now - new Date(m.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      const fire = age > 7 ? '<span class="memo-fire" title="1週間放置中">🔥</span>' : '';
-      const date = new Date(m.createdAt).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' });
-      return `<div class="memo-card ${m.id === currentMemoId ? 'active' : ''}" data-id="${m.id}" onclick="loadMemo('${m.id}')">
-        <button class="delete-btn" onclick="deleteMemo('${m.id}',event)">×</button>
-        <div class="memo-card-title">${escHtml(m.title)}</div>
-        <div class="memo-card-preview">${escHtml(m.text)}</div>
-        <div class="memo-card-meta"><span class="memo-date">${date}</span>${fire}</div>
-      </div>`;
-    }).join('');
-  }
-
-  // ===== CONTROLS =====
-  function selectStruct(btn, val) {
-    document.querySelectorAll('.struct-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    selectedStruct = val;
-  }
-
-  function selectFormat(btn, val) {
-    btn.classList.toggle('active');
-    if (btn.classList.contains('active')) selectedFormats.add(val);
-    else selectedFormats.delete(val);
-  }
-
-  function switchTab(btn, tabId) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.output-pane').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(tabId).classList.add('active');
-  }
-
-  // ===== CONVERT =====
-  async function convertMemo() {
-    const text = document.getElementById('memo-input').value.trim();
-    if (!text) { showToast('⚠️ メモを入力してください'); return; }
-    const apiKey = localStorage.getItem('sx-apikey');
-    if (!apiKey) { showToast('❌ APIキーを設定してください'); return; }
-    if (!selectedFormats.size) { showToast('⚠️ 出力フォーマットを選んでください'); return; }
-
-    const tone = document.getElementById('tone').value;
-    const length = document.getElementById('length').value;
-    const toneLabel = ['とても丁寧', '丁寧', '普通', 'ややカジュアル', 'ラフ'][tone - 1];
-    const lengthLabel = ['とても短く', '短め', '標準', '長め', 'とても長く'][length - 1];
-
-    const formatsStr = [...selectedFormats].join('、');
-
-    const prompt = `あなたは優秀なコンテンツ編集者です。以下のメモを構造化して複数のフォーマットに変換してください。
-
-【元のメモ】
-${text}
-
-【設定】
-- 構造化フレームワーク: ${selectedStruct}法
-- トーン: ${toneLabel}
-- 長さ: ${lengthLabel}
-- 出力フォーマット: ${formatsStr}
-
-以下のJSON形式のみで返してください（他のテキスト不要）:
-{
-  "x": "X(Twitter)用の投稿文（140文字以内）。不要なら空文字",
-  "note": "note用の記事本文（Markdown形式、見出しあり）。不要なら空文字",
-  "md": "Markdown形式の構造化メモ。不要なら空文字"
-}
-
-フォーマットが不要な場合は空文字("")を返してください。JSONのみ返し、コードブロック不要。`;
-
-    showLoading(true);
-    document.getElementById('convert-btn').disabled = true;
-
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{ role: 'user', content: prompt }]
-        })
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error?.message || 'API Error');
-      }
-
-      const data = await res.json();
-      const raw = data.content[0].text.trim();
-      const parsed = JSON.parse(raw);
-
-      outputs = { x: parsed.x || '', note: parsed.note || '', md: parsed.md || '' };
-      renderOutputs();
-      showToast('✅ 変換完了！');
-
-    } catch (e) {
-      showToast('❌ エラー: ' + e.message);
-    } finally {
-      showLoading(false);
-      document.getElementById('convert-btn').disabled = false;
-    }
-  }
-
-  function renderOutputs() {
-    // X
-    const xEl = document.getElementById('x-preview');
-    if (outputs.x) {
-      const count = [...outputs.x].length;
-      const over = count > 140;
-      xEl.innerHTML = `
-        <div class="x-header">
-          <div class="x-avatar">あ</div>
-          <div><div class="x-name">あなた</div><div class="x-handle">@yourhandle</div></div>
-        </div>
-        <div class="x-content">${escHtml(outputs.x)}</div>
-        <div class="x-char-count ${over ? 'over' : ''}">${count} / 140文字</div>
-      `;
-    } else {
-      xEl.innerHTML = '<div class="empty-state"><div class="empty-icon">✦</div><div>X用の出力なし</div></div>';
-    }
-
-    // note
-    const noteEl = document.getElementById('note-preview');
-    if (outputs.note) {
-      noteEl.innerHTML = markdownToHtml(outputs.note);
-    } else {
-      noteEl.innerHTML = '<div class="empty-state"><div class="empty-icon">✦</div><div>note用の出力なし</div></div>';
-    }
-
-    // MD
-    document.getElementById('md-preview').textContent = outputs.md || '（Markdown出力なし）';
-  }
-
-  // ===== COPY =====
-  async function copyOutput(type) {
-    const text = outputs[type];
-    if (!text) { showToast('⚠️ コピーするものがありません'); return; }
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast('📋 コピーしました！');
-    } catch {
-      showToast('❌ コピーに失敗しました');
-    }
-  }
-
-  // ===== UTILS =====
-  function showLoading(show) {
-    document.getElementById('loading').style.display = show ? 'flex' : 'none';
-  }
-
-  function showToast(msg) {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 2500);
-  }
-
-  function escHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  function markdownToHtml(md) {
-    return md
-      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-      .replace(/^### (.+)$/gm, '<h3 style="font-size:13px;font-weight:700;margin:10px 0 4px">$1</h3>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/^[-*] (.+)$/gm, '<li style="margin-left:16px;margin-bottom:2px">$1</li>')
-      .replace(/\n\n/g, '</p><p>')
-      .replace(/\n/g, '<br>')
-      .replace(/^(?!<[hlp])/gm, '')
-      || md;
-  }
-
-  // ===== INIT =====
+// ===== INIT =====
+(function init() {
   loadApiKey();
   renderMemos();
+  updSlider();
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+  const hint = isMac ? '⌘↵' : 'Ctrl+↵';
+  document.getElementById('convert-hint').textContent = hint;
+  document.getElementById('kbd-hint').textContent = hint + ' で変換';
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); doConvert(); }
+  });
+})();
+
+// ===== API KEY =====
+function saveApiKey() {
+  const k = document.getElementById('api-key-input').value.trim();
+  if (!k.startsWith('sk-ant')) { toast('❌ APIキーの形式が違います'); return; }
+  localStorage.setItem('sx-apikey', k);
+  setApiStatus(true);
+  toast('✅ APIキーを保存しました');
+}
+function loadApiKey() {
+  const k = localStorage.getItem('sx-apikey');
+  if (k) { document.getElementById('api-key-input').value = k; setApiStatus(true); }
+}
+function setApiStatus(ok) {
+  const el = document.getElementById('api-status');
+  el.textContent = ok ? '✅ 設定済み' : '未設定';
+  el.style.color = ok ? '#2e7d5e' : '';
+}
+
+// ===== MEMO =====
+function onInput() {
+  const t = document.getElementById('memo-input').value;
+  document.getElementById('char-count').textContent = [...t].length.toLocaleString() + '文字';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (!currentId || !t.trim()) return;
+    const i = memos.findIndex(m => m.id === currentId);
+    if (i < 0) return;
+    memos[i].text = t;
+    memos[i].title = t.split('\n')[0].trim().slice(0,30) || '無題';
+    persist();
+    renderMemos();
+    const lbl = document.getElementById('autosave-label');
+    lbl.classList.add('on');
+    setTimeout(() => lbl.classList.remove('on'), 1800);
+  }, 1000);
+}
+
+function newMemo() {
+  currentId = null;
+  document.getElementById('memo-input').value = '';
+  document.getElementById('char-count').textContent = '0文字';
+  document.querySelectorAll('.memo-card').forEach(c => c.classList.remove('active'));
+}
+
+function saveMemo() {
+  const t = document.getElementById('memo-input').value.trim();
+  if (!t) { toast('⚠️ メモが空です'); return; }
+  const title = t.split('\n')[0].trim().slice(0,30) || '無題';
+  if (currentId) {
+    const i = memos.findIndex(m => m.id === currentId);
+    if (i >= 0) { memos[i].text = t; memos[i].title = title; }
+  } else {
+    const m = {id: Date.now().toString(), text:t, title, createdAt: new Date().toISOString()};
+    memos.unshift(m);
+    currentId = m.id;
+  }
+  persist();
+  renderMemos();
+  toast('💾 保存しました');
+}
+
+function loadMemo(id) {
+  const m = memos.find(m => m.id === id);
+  if (!m) return;
+  currentId = id;
+  document.getElementById('memo-input').value = m.text;
+  document.getElementById('char-count').textContent = [...m.text].length.toLocaleString() + '文字';
+  document.querySelectorAll('.memo-card').forEach(c => c.classList.toggle('active', c.dataset.id === id));
+}
+
+function deleteMemo(id, e) {
+  e.stopPropagation();
+  if (!confirm('このメモを削除しますか？')) return;
+  memos = memos.filter(m => m.id !== id);
+  if (currentId === id) { currentId = null; document.getElementById('memo-input').value = ''; document.getElementById('char-count').textContent = '0文字'; }
+  persist();
+  renderMemos();
+  toast('🗑️ 削除しました');
+}
+
+function renderMemos() {
+  const q = (document.getElementById('memo-search')?.value || '').toLowerCase();
+  const list = q ? memos.filter(m => m.title.toLowerCase().includes(q) || m.text.toLowerCase().includes(q)) : memos;
+  document.getElementById('memo-count').textContent = memos.length + '件';
+  const el = document.getElementById('memo-list');
+  if (!list.length) {
+    el.innerHTML = `<div class="empty-state" style="min-height:60px"><div class="empty-icon">📝</div><div>${q ? '見つかりません' : 'メモがありません'}</div></div>`;
+    return;
+  }
+  const now = Date.now();
+  el.innerHTML = list.map(m => {
+    const age = (now - new Date(m.createdAt).getTime()) / 86400000;
+    const fire = age > 7 ? '<span title="1週間放置">🔥</span>' : '';
+    const date = new Date(m.createdAt).toLocaleDateString('ja-JP',{month:'numeric',day:'numeric'});
+    return `<div class="memo-card${m.id===currentId?' active':''}" data-id="${m.id}" onclick="loadMemo('${m.id}')">
+      <button class="delete-btn" onclick="deleteMemo('${m.id}',event)">×</button>
+      <div class="memo-card-title">${esc(m.title)}</div>
+      <div class="memo-card-preview">${esc(m.text)}</div>
+      <div class="memo-card-meta"><span class="memo-date">${date}</span>${fire}</div>
+    </div>`;
+  }).join('');
+}
+
+function persist() { localStorage.setItem('sx-memos', JSON.stringify(memos)); }
+
+// ===== CONTROLS =====
+function selStruct(btn, val) {
+  document.querySelectorAll('.struct-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  selStruct_ = val;
+}
+function selFormat(btn, val) {
+  if (btn.classList.contains('active') && selFormats.size <= 1) { toast('⚠️ 最低1つ選んでください'); return; }
+  btn.classList.toggle('active');
+  btn.classList.contains('active') ? selFormats.add(val) : selFormats.delete(val);
+}
+function switchTab(btn, id) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.output-pane').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+function updSlider() {
+  const t = parseInt(document.getElementById('sl-tone').value);
+  const l = parseInt(document.getElementById('sl-len').value);
+  document.getElementById('sv-tone').textContent = TONE_LABELS[t-1];
+  document.getElementById('sv-len').textContent  = LEN_LABELS[l-1];
+}
+
+// ===== CONVERT (streaming) =====
+async function doConvert() {
+  if (converting) return;
+  const text = document.getElementById('memo-input').value.trim();
+  if (!text) { toast('⚠️ メモを入力してください'); return; }
+  const apiKey = localStorage.getItem('sx-apikey');
+  if (!apiKey) { toast('❌ APIキーを設定してください'); return; }
+
+  const tone = parseInt(document.getElementById('sl-tone').value);
+  const len  = parseInt(document.getElementById('sl-len').value);
+  const fmts = [...selFormats];
+  const fwDesc = FW_DESC[selStruct_] ? `（${FW_DESC[selStruct_]}）` : '';
+
+  const fmtDescs = {
+    x:'X(Twitter)投稿 — 140文字以内、改行あり、ハッシュタグ1〜2個',
+    note:'note記事 — Markdown形式、H1タイトル・H2見出し・段落・まとめ',
+    md:'構造化Markdownメモ — 箇条書き・見出し・太字を活用'
+  };
+
+  const system = `あなたは一流のコンテンツエディターです。ユーザーの生メモを指定フレームワーク・トーン・フォーマットに従い高品質コンテンツへ変換します。
+ルール: 元メモの核心メッセージを保持する / 指定フォーマットの文字数・構造を厳守 / 自然で読みやすい日本語 / JSONのみ返す（コードブロック・説明不要）`;
+
+  const user = `【元のメモ】\n${text}\n\n【設定】\nフレームワーク: ${selStruct_}法${fwDesc}\nトーン: ${TONE_LABELS[tone-1]}\n長さ: ${LEN_LABELS[len-1]}\n\n【出力フォーマット】\n${fmts.map(f=>`- ${f}: ${fmtDescs[f]}`).join('\n')}\n\n以下JSONのみ返してください:\n{"x":"${fmts.includes('x')?'X投稿テキスト':''}","note":"${fmts.includes('note')?'note記事Markdown':''}","md":"${fmts.includes('md')?'構造化Markdownメモ':''}"}`;
+
+  converting = true;
+  setUI(true);
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        stream: true,
+        system,
+        messages: [{role:'user', content:user}]
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({}));
+      throw new Error(apiErr(res.status, err));
+    }
+
+    setLoading(false);
+    setStream(true, 'AIが生成中...');
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', acc = '', chars = 0;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const d = line.slice(6).trim();
+        if (!d || d === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(d);
+          if (ev.type === 'content_block_delta' && ev.delta?.text) {
+            acc += ev.delta.text;
+            chars += [...ev.delta.text].length;
+            setStream(true, `生成中... ${chars.toLocaleString()}文字`);
+          }
+        } catch {}
+      }
+    }
+
+    setStream(false);
+
+    let parsed;
+    try {
+      parsed = JSON.parse(acc.trim());
+    } catch {
+      const m = acc.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error('JSONの解析に失敗しました');
+      parsed = JSON.parse(m[0]);
+    }
+
+    outputs = {x: parsed.x||'', note: parsed.note||'', md: parsed.md||''};
+    renderOutputs();
+    showRegen(true);
+
+    // Auto-switch to first produced tab
+    for (const fmt of ['x','note','md']) {
+      if (outputs[fmt]) { switchTab(document.getElementById('tab-btn-'+fmt), 'tab-'+fmt); break; }
+    }
+
+    toast('✅ 変換完了！');
+  } catch(e) {
+    setStream(false);
+    toast('❌ ' + e.message);
+  } finally {
+    converting = false;
+    setUI(false);
+  }
+}
+
+function apiErr(status, err) {
+  if (status === 401) return 'APIキーが無効です。確認してください。';
+  if (status === 429) return 'レート制限に達しました。しばらく待ってから再試行してください。';
+  if (status === 500) return 'Claude APIサーバーエラーです。後ほど再試行してください。';
+  if (status === 529) return 'Claude APIが混雑しています。しばらく待ってから再試行してください。';
+  return err.error?.message || `APIエラー (${status})`;
+}
+
+function setUI(on) {
+  const btn = document.getElementById('convert-btn');
+  btn.disabled = on;
+  document.getElementById('convert-label').textContent = on ? '生成中...' : '✦ 変換する';
+  document.querySelectorAll('.regen-btn').forEach(b => b.disabled = on);
+  if (on) setLoading(true);
+  else { setLoading(false); setStream(false); }
+}
+function setLoading(on) { document.getElementById('loading').classList.toggle('on', on); }
+function setStream(on, txt='') {
+  document.getElementById('stream-bar').classList.toggle('on', on);
+  if (txt) document.getElementById('stream-txt').textContent = txt;
+  if (on) setLoading(false);
+}
+function showRegen(on) { document.querySelectorAll('.regen-btn').forEach(b => b.classList.toggle('on', on)); }
+
+// ===== RENDER =====
+function renderOutputs() {
+  // X
+  const xEl = document.getElementById('x-preview');
+  if (outputs.x) {
+    const cnt = [...outputs.x].length;
+    const over = cnt > 140;
+    xEl.innerHTML = `
+      <div class="x-header">
+        <div class="x-avatar">あ</div>
+        <div><div class="x-name">あなた</div><div class="x-handle">@yourhandle</div></div>
+      </div>
+      <div class="x-content">${esc(outputs.x)}</div>
+      <div class="x-count${over?' over':''}">${cnt} / 140文字</div>
+      ${over?`<div class="x-thread-warn">⚠️ 140字超のためスレッドで投稿してください</div>`:''}`;
+  } else {
+    xEl.innerHTML = '<div class="empty-state"><div class="empty-icon">✦</div><div>X用の出力なし</div></div>';
+  }
+
+  // note
+  const noteEl = document.getElementById('note-preview');
+  noteEl.innerHTML = outputs.note ? mdToHtml(outputs.note) : '<div class="empty-state"><div class="empty-icon">✦</div><div>note用の出力なし</div></div>';
+
+  // MD
+  document.getElementById('md-preview').textContent = outputs.md || '（Markdown出力なし）';
+}
+
+// ===== MARKDOWN RENDERER =====
+function mdToHtml(md) {
+  if (!md) return '';
+  const lines = md.split('\n');
+  let html = '', inList = false, listType = '', inCode = false, codeLines = [];
+
+  for (const line of lines) {
+    if (line.startsWith('```')) {
+      if (inCode) {
+        html += `<pre><code>${esc(codeLines.join('\n'))}</code></pre>`;
+        codeLines = []; inCode = false;
+      } else {
+        if (inList) { html += listType==='ul'?'</ul>':'</ol>'; inList=false; }
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) { codeLines.push(line); continue; }
+
+    const isLI = /^[-*+]\s/.test(line) || /^\d+\.\s/.test(line);
+    if (inList && !isLI && line.trim()) { html += listType==='ul'?'</ul>':'</ol>'; inList=false; }
+
+    if (/^[-*_]{3,}$/.test(line.trim())) { html += '<hr>'; continue; }
+    if (line.startsWith('### ')) { html += `<h3>${inlineMd(line.slice(4))}</h3>`; continue; }
+    if (line.startsWith('## '))  { html += `<h2>${inlineMd(line.slice(3))}</h2>`; continue; }
+    if (line.startsWith('# '))   { html += `<h1>${inlineMd(line.slice(2))}</h1>`; continue; }
+    if (line.startsWith('> '))   { html += `<blockquote>${inlineMd(line.slice(2))}</blockquote>`; continue; }
+
+    if (/^[-*+]\s/.test(line)) {
+      if (!inList || listType!=='ul') { if(inList)html+=listType==='ul'?'</ul>':'</ol>'; html+='<ul>'; inList=true; listType='ul'; }
+      html += `<li>${inlineMd(line.replace(/^[-*+]\s/,''))}</li>`; continue;
+    }
+    if (/^\d+\.\s/.test(line)) {
+      if (!inList || listType!=='ol') { if(inList)html+=listType==='ul'?'</ul>':'</ol>'; html+='<ol>'; inList=true; listType='ol'; }
+      html += `<li>${inlineMd(line.replace(/^\d+\.\s/,''))}</li>`; continue;
+    }
+
+    if (!line.trim()) { if(inList){html+=listType==='ul'?'</ul>':'</ol>';inList=false;} continue; }
+    html += `<p>${inlineMd(line)}</p>`;
+  }
+
+  if (inList) html += listType==='ul'?'</ul>':'</ol>';
+  if (inCode) html += `<pre><code>${esc(codeLines.join('\n'))}</code></pre>`;
+  return html;
+}
+
+function inlineMd(s) {
+  return esc(s)
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
+}
+
+// ===== COPY =====
+async function copyOut(type) {
+  const t = outputs[type];
+  if (!t) { toast('⚠️ コピーするものがありません'); return; }
+  try {
+    await navigator.clipboard.writeText(t);
+    toast('📋 コピーしました！');
+  } catch { toast('❌ コピーに失敗しました'); }
+}
+
+// ===== UTILS =====
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('on'), 2600);
+}
 </script>
 </body>
 </html>

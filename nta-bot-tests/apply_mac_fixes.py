@@ -1,0 +1,1106 @@
+#!/usr/bin/env python3
+"""
+Mac上の enricher.py と watchdog.py に累積的な改善を適用するパッチスクリプト。
+
+使い方:
+  python3 apply_mac_fixes.py                       # デフォルトパス
+  python3 apply_mac_fixes.py ~/Downloads/nta-bot/tools/nta/bot/
+
+パッチ一覧:
+  E01  SKIP_DOMAINS: 求人・口コミ・レビュー・政府・URLショートナー追加
+  E02  _BAD_PATH_PATTERNS: 企業情報DBシグナル検出
+  E03  _BAD_SCHEMES / _BAD_PORTS / _MAX_URL_LEN: is_bad_url 強化
+  E04  _VALID_SCHEMES / IP除外: _is_valid_result_url 強化
+  E05  normalize_url: None安全・小文字化・デフォルトポート除去・UTM除去
+  E06  write_scrape_results: no_url → url_failed 追加
+  E07  _is_skip_domain: ワイルドカード対応スキップドメインチェック
+  E08  normalize_url: 末尾スラッシュ正規化 (p.path or "/")
+  E09  is_soft_error_page: HTTP 200 実質エラーページ検出
+  E10  classify_title_quality: タイトル品質分類
+  E11  extract_page_info: HTMLからタイトル・本文を抽出
+  E12  write_url_results: normalize_url 適用（URL保存前に正規化）
+  E13  estimate_crawl_progress: クロール進捗統計
+  W01  reset_stuck: url_found(hp_url=NULL) → url_failed 追加
+  W02  triage_url_failed: エラー種別ごとの最適再試行戦略
+  W03  check_db_consistency: DB整合性チェック関数追加
+  W04  detect_duplicate_urls / reset_duplicate_urls: ポータルURL検出・リセット
+"""
+
+import ast
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+GREEN = "\033[0;32m"
+YELLOW = "\033[1;33m"
+RED = "\033[0;31m"
+RST = "\033[0m"
+
+BOT_DIR = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 \
+    else Path.home() / "Downloads/nta-bot/tools/nta/bot"
+ENRICHER = BOT_DIR / "enricher.py"
+WATCHDOG = BOT_DIR / "watchdog.py"
+
+applied = []
+skipped = []
+failed = []
+
+
+def ok(msg):
+    print(f"  {GREEN}✓{RST}  {msg}")
+    applied.append(msg)
+
+
+def skip(msg):
+    print(f"  {YELLOW}–{RST}  {msg} (既適用)")
+    skipped.append(msg)
+
+
+def fail(msg, detail=""):
+    print(f"  {RED}✗{RST}  {msg}" + (f"\n      {detail}" if detail else ""))
+    failed.append(msg)
+
+
+def backup(path: Path):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = path.with_suffix(f".py.bak_{ts}")
+    shutil.copy2(path, bak)
+    return bak
+
+
+def verify_syntax(path: Path) -> bool:
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(path)],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
+def patch(path: Path, name: str, marker: str, old: str, new: str) -> bool:
+    """
+    ファイルを読み込み、old を new に置換する。
+    marker が既にあれば適用済みとしてスキップ。
+    old が見つからなければ失敗として報告。
+    """
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        skip(name)
+        return True
+    if old not in text:
+        fail(name, f"パターン未検出 — 手動確認が必要: {old[:60]!r}…")
+        return False
+    text = text.replace(old, new, 1)
+    path.write_text(text, encoding="utf-8")
+    if not verify_syntax(path):
+        # ロールバック
+        path.write_text(path.read_text(encoding="utf-8").replace(new, old, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return False
+    ok(name)
+    return True
+
+
+def patch_append(path: Path, name: str, marker: str, anchor: str, addition: str) -> bool:
+    """anchor の直後に addition を挿入する"""
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        skip(name)
+        return True
+    if anchor not in text:
+        fail(name, f"アンカー未検出: {anchor[:60]!r}…")
+        return False
+    text = text.replace(anchor, anchor + addition, 1)
+    path.write_text(text, encoding="utf-8")
+    if not verify_syntax(path):
+        path.write_text(text.replace(anchor + addition, anchor, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return False
+    ok(name)
+    return True
+
+
+# ═══════════════════════════════════════════════════════════
+#  enricher.py パッチ
+# ═══════════════════════════════════════════════════════════
+
+def patch_e01_skip_domains(text_orig: str, path: Path) -> str:
+    """SKIP_DOMAINS: 求人・口コミ・レビュー・政府・URLショートナー追加"""
+    name = "E01 SKIP_DOMAINS 拡張"
+    marker = "# URLショートナー"
+
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        skip(name)
+        return text
+
+    # 既存 SKIP_DOMAINS の末尾を探して追記
+    # 口コミ・評判サイト行の後ろに追加
+    add_block = """
+    # 求人サイト（企業の公式HPではなく求人ページ）
+    "indeed.com", "doda.jp", "rikunabi.com", "mynavi.jp",
+    "en-japan.com", "type.jp", "hatarako.net", "job-gear.jp",
+    # 口コミ・評判サイト
+    "glassdoor.com", "vorkers.com", "openwork.jp",
+    # 飲食店・観光レビュー・予約サイト（企業HPではなくポータル）
+    "tabelog.com", "retty.me", "hotpepper.jp", "jalan.net",
+    "tripadvisor.jp", "tripadvisor.com", "booking.com", "yelp.co.jp",
+    # 政府・行政ポータル（企業自身のサイトではない）
+    "nta.go.jp", "e-gov.go.jp", "mirasapo-plus.go.jp",
+    "j-net21.smrj.go.jp", "hellowork.mhlw.go.jp",
+    # URLショートナー（最終的な企業HPではない）
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl",
+    "ow.ly", "short.io", "lnkd.in", "ift.tt", "buff.ly","""
+
+    # 既知のパターンを探す (SKIP_DOMAINS の閉じ括弧)
+    patterns_to_try = [
+        ('    "mens-aso.co.jp",\n])', '    "mens-aso.co.jp",' + add_block + '\n])'),
+        ('    "mens-aso.co.jp"\n])', '    "mens-aso.co.jp",' + add_block + '\n])'),
+        ('"athome.co.jp", "mens-aso.co.jp",\n])',
+         '"athome.co.jp", "mens-aso.co.jp",' + add_block + '\n])'),
+    ]
+    for old, new in patterns_to_try:
+        if old in text:
+            text = text.replace(old, new, 1)
+            path.write_text(text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return text
+            path.write_text(text.replace(new, old, 1), encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return path.read_text(encoding="utf-8")
+
+    fail(name, "SKIP_DOMAINS の末尾パターンが見つかりません — 手動確認が必要")
+    return text
+
+
+def patch_e02_bad_path_patterns(path: Path):
+    """E02 _BAD_PATH_PATTERNS: 企業情報DBシグナル検出"""
+    name = "E02 _BAD_PATH_PATTERNS 追加"
+    marker = "_BAD_PATH_PATTERNS"
+
+    # 追加するコード (_is_valid_result_url や is_bad_url の前に入れる)
+    new_code = """
+import re as _re_mod
+
+_BAD_PATH_PATTERNS = _re_mod.compile(
+    r"/(hojin|houjin|kaisha|corporate_number|company-info|biz-info|hojinbango)"
+    r"(?=[/?#]|$)"
+    r"|[?&](corporate_number|hojin_id|company_id)=",
+    _re_mod.IGNORECASE,
+)
+
+"""
+    # _is_valid_result_url の直前に挿入
+    anchors = ["def _is_valid_result_url(", "def is_valid_result_url("]
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        skip(name)
+        return
+    for anchor in anchors:
+        if anchor in text:
+            return patch_append(path, name, marker, anchor, "")
+    # アンカーが見つからない → SKIP_DOMAINS の下に追加
+    anchor2 = "\nSKIP_DOMAINS = frozenset"
+    if anchor2 in text:
+        idx = text.find(anchor2)
+        # SKIP_DOMAINS ブロックの終端を探す
+        end = text.find("\n])", idx)
+        if end != -1:
+            insert_at = end + 3  # "])" の後
+            new_text = text[:insert_at] + "\n" + new_code + text[insert_at:]
+            path.write_text(new_text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return
+            path.write_text(text, encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return
+    fail(name, "挿入箇所が見つかりません")
+
+
+def patch_e03_bad_schemes_ports(path: Path):
+    """E03 _BAD_SCHEMES / _BAD_PORTS / _MAX_URL_LEN + is_bad_url 強化"""
+    name = "E03 is_bad_url 強化 (_BAD_SCHEMES/_BAD_PORTS/_MAX_URL_LEN)"
+    text = path.read_text(encoding="utf-8")
+    if "_BAD_SCHEMES" in text:
+        skip(name)
+        return
+
+    constants = '''
+_BAD_SCHEMES = frozenset(["data", "javascript", "mailto", "tel", "ftp"])
+_BAD_PORTS   = frozenset(["8080", "8443", "3000", "3001", "4000", "5000", "8000", "8888", "9000"])
+_MAX_URL_LEN = 500
+'''
+
+    # is_bad_url 関数の先頭に None/length チェックを追加
+    old_func_start = "def is_bad_url(url: str) -> bool:"
+    new_func_start = "def is_bad_url(url) -> bool:"
+    old_body_start = "    try:\n        p = urlparse(url)"
+    new_body_start = (
+        "    if not url or len(url) > _MAX_URL_LEN:\n"
+        "        return True\n"
+        "    try:\n"
+        "        p = urlparse(url)\n"
+        "        if p.scheme in _BAD_SCHEMES:\n"
+        "            return True\n"
+        "        if p.port and str(p.port) in _BAD_PORTS:\n"
+        "            return True"
+    )
+
+    # まず定数ブロックを is_bad_url の直前に挿入
+    anchor_func = old_func_start if old_func_start in text else new_func_start
+    if anchor_func not in text:
+        fail(name, "is_bad_url 関数が見つかりません")
+        return
+    text = text.replace(anchor_func, constants + anchor_func, 1)
+    # 次に関数本体を強化
+    if old_body_start in text:
+        text = text.replace(old_body_start, new_body_start, 1)
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            constants + anchor_func, anchor_func, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e04_valid_scheme_ip(path: Path):
+    """E04 _is_valid_result_url: http/https のみ許可 + IPアドレス除外"""
+    name = "E04 _is_valid_result_url スキーム/IP 検証"
+    text = path.read_text(encoding="utf-8")
+    if "_VALID_SCHEMES" in text:
+        skip(name)
+        return
+
+    # _is_valid_result_url の先頭に追加
+    # 関数の最初の try: の直後に追加
+    old = """def _is_valid_result_url(url"""
+    if old not in text:
+        fail(name, "_is_valid_result_url 関数が見つかりません")
+        return
+
+    valid_schemes_const = '\n_VALID_SCHEMES = frozenset(["http", "https"])\n'
+
+    # _BAD_PATH_PATTERNS の後 or SKIP_DOMAINS の後に定数を追加
+    if "_BAD_PATH_PATTERNS" in text:
+        anchor = "_BAD_PATH_PATTERNS = "
+        end_of_pattern = text.find("\n)", text.find(anchor))
+        if end_of_pattern == -1:
+            end_of_pattern = text.find("\n    re.IGNORECASE,\n)", text.find(anchor))
+        # パターン定義の直後の行末 +1
+        insert_at = text.find("\n", end_of_pattern) + 1
+        text = text[:insert_at] + valid_schemes_const + text[insert_at:]
+    else:
+        text = text.replace(old, valid_schemes_const + old, 1)
+
+    # 関数本体に ip_address チェックを追加
+    # 関数内部の最初の try: の後
+    new_check = """        import ipaddress as _ipa
+        if p.scheme not in _VALID_SCHEMES:
+            return False
+        _h = p.netloc.removeprefix("www.")
+        if not _h:
+            return False
+        _host = _h[1:_h.index("]")] if _h.startswith("[") else _h.split(":")[0]
+        try:
+            _ipa.ip_address(_host)
+            return False
+        except ValueError:
+            pass
+"""
+    # 既存の netloc チェック部分を探して置き換え
+    old_check1 = "        h = p.netloc.removeprefix(\"www.\")\n        if not h:\n            return False"
+    old_check2 = '        netloc = p.netloc.removeprefix("www.")\n        if not netloc:\n            return False'
+    if old_check1 in text:
+        text = text.replace(old_check1,
+            '        _h = p.netloc.removeprefix("www.")\n'
+            '        h = _h\n'
+            '        if not h:\n            return False\n'
+            '        import ipaddress as _ipa\n'
+            '        _host = h[1:h.index("]")] if h.startswith("[") else h.split(":")[0]\n'
+            '        try:\n            _ipa.ip_address(_host)\n            return False\n'
+            '        except ValueError:\n            pass', 1)
+
+    # scheme check の追加 (関数 try: の直後)
+    old_try = "    try:\n        p = urlparse(url)\n        h = p.netloc"
+    new_try = ("    try:\n"
+               "        p = urlparse(url)\n"
+               "        if p.scheme not in _VALID_SCHEMES:\n"
+               "            return False\n"
+               "        h = p.netloc")
+    if old_try in text and "_VALID_SCHEMES" in text:
+        # Already have _VALID_SCHEMES, just add the check
+        text = text.replace(old_try, new_try, 1)
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        fail(name, "構文エラー — 手動確認が必要 (ロールバックなし)")
+
+
+def patch_e05_normalize_url(path: Path):
+    """E05 normalize_url 関数追加/更新"""
+    name = "E05 normalize_url 追加"
+    text = path.read_text(encoding="utf-8")
+    if "normalize_url" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+_UTM_PARAMS = frozenset([
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "fbclid", "gclid", "msclkid", "yclid",
+])
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def normalize_url(url):
+    """UTM除去・小文字化・デフォルトポート除去・フラグメント除去"""
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse, urlunparse
+        p = urlparse(url)
+        if not p.scheme or not p.netloc:
+            return None
+        scheme = p.scheme.lower()
+        host = p.hostname or ""
+        port = p.port
+        if port and str(port) == _DEFAULT_PORTS.get(scheme):
+            netloc = host.lower()
+        else:
+            netloc = p.netloc.lower()
+        if p.query:
+            pairs = [kv for kv in p.query.split("&")
+                     if kv.split("=")[0].lower() not in _UTM_PARAMS]
+            query = "&".join(pairs)
+        else:
+            query = ""
+        return urlunparse((scheme, netloc, p.path, p.params, query, "")) or None
+    except Exception:
+        return None
+
+'''
+
+    # SKIP_DOMAINS の前 or ファイル末尾に追加
+    anchor = "\nSKIP_DOMAINS = frozenset"
+    if anchor in text:
+        text = text.replace(anchor, func_code + anchor, 1)
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e06_no_url_url_failed(path: Path):
+    """E06 write_scrape_results: no_url → url_failed"""
+    name = "E06 write_scrape_results no_url → url_failed"
+    text = path.read_text(encoding="utf-8")
+
+    # 既に no_url が含まれていればスキップ
+    if '"no_url"' in text and "url_failed" in text:
+        # より厳密にチェック
+        if 'error in ("bad_url", "not_found", "blocked", "no_url")' in text \
+                or "no_url" in text:
+            skip(name)
+            return
+
+    # よくある write_scrape_results のパターン
+    old1 = 'error in ("bad_url", "not_found", "blocked")'
+    new1 = 'error in ("bad_url", "not_found", "blocked", "no_url")'
+    if old1 in text:
+        text = text.replace(old1, new1, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new1, old1, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return
+
+    old2 = "error in ['bad_url', 'not_found', 'blocked']"
+    new2 = "error in ['bad_url', 'not_found', 'blocked', 'no_url']"
+    if old2 in text:
+        text = text.replace(old2, new2, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new2, old2, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return
+
+    fail(name, "write_scrape_results の bad_url パターンが見つかりません")
+
+
+def patch_e07_is_skip_domain(path: Path):
+    """E07 _is_skip_domain: ワイルドカード対応スキップドメインチェック"""
+    name = "E07 _is_skip_domain ワイルドカード対応"
+    text = path.read_text(encoding="utf-8")
+    if "_is_skip_domain" in text:
+        skip(name)
+        return
+
+    helper = '''
+
+def _is_skip_domain(h: str, skip_set: frozenset) -> bool:
+    for d in skip_set:
+        if d.endswith("."):
+            d_base = d[:-1]
+            if h == d_base or h.startswith(d_base + "."):
+                return True
+        else:
+            if h == d or h.endswith("." + d):
+                return True
+    return False
+
+'''
+
+    anchor = "\nSKIP_DOMAINS = frozenset"
+    if anchor not in text:
+        fail(name, "SKIP_DOMAINS が見つかりません")
+        return
+    skip_start = text.find(anchor)
+    skip_end = text.find("\n])", skip_start)
+    if skip_end == -1:
+        fail(name, "SKIP_DOMAINS ブロックの終端が見つかりません")
+        return
+    insert_at = skip_end + 3
+    text = text[:insert_at] + helper + text[insert_at:]
+
+    # _is_valid_result_url 内のスキップドメインチェックを更新
+    for old_check in [
+        'if any(h.endswith("." + d) or h == d for d in SKIP_DOMAINS):',
+        'if any(h == d or h.endswith("." + d) for d in SKIP_DOMAINS):',
+        'if any(h == d or h.endswith("."+d) for d in SKIP_DOMAINS):',
+        "if any(h.endswith('.' + d) or h == d for d in SKIP_DOMAINS):",
+        "if any(h == d or h.endswith('.' + d) for d in SKIP_DOMAINS):",
+    ]:
+        if old_check in text:
+            text = text.replace(old_check, "if _is_skip_domain(h, SKIP_DOMAINS):", 1)
+            break
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        orig = path.read_text(encoding="utf-8")
+        path.write_text(orig.replace(helper, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e08_trailing_slash(path: Path):
+    """E08 normalize_url: 末尾スラッシュ正規化"""
+    name = "E08 normalize_url 末尾スラッシュ正規化"
+    text = path.read_text(encoding="utf-8")
+    if 'p.path or "/"' in text or "p.path or '/'" in text:
+        skip(name)
+        return
+    if "normalize_url" not in text:
+        fail(name, "normalize_url 未検出 (E05 を先に適用してください)")
+        return
+
+    old = 'return urlunparse((scheme, netloc, p.path, p.params, query, "")) or None'
+    new = 'return urlunparse((scheme, netloc, p.path or "/", p.params, query, "")) or None'
+    if old not in text:
+        old = "return urlunparse((scheme, netloc, p.path, p.params, query, ''))"
+        new = "return urlunparse((scheme, netloc, p.path or '/', p.params, query, ''))"
+    if old not in text:
+        fail(name, "normalize_url の return パターンが見つかりません")
+        return
+
+    text = text.replace(old, new, 1)
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(new, old, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e09_soft_error_page(path: Path):
+    """E09 is_soft_error_page: HTTP 200 実質エラーページ検出"""
+    name = "E09 is_soft_error_page 追加"
+    text = path.read_text(encoding="utf-8")
+    if "is_soft_error_page" in text or "_BAD_TITLE_PATTERNS" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    func_code = re_import + '''
+_BAD_TITLE_PATTERNS = re.compile(
+    r"\\b(?:404|not found|page not found|403|forbidden|access denied"
+    r"|500|internal server error|503|service unavailable)\\b"
+    r"|ページが見つかりません|お探しのページ|アクセスできません|アクセス拒否"
+    r"|メンテナンス中|サーバーエラー",
+    re.IGNORECASE,
+)
+_MIN_BODY_LEN = 200
+
+
+def is_soft_error_page(title, body_text):
+    if title and _BAD_TITLE_PATTERNS.search(title):
+        tl = title.lower()
+        if ("404" in tl or "not found" in tl
+                or "見つかりません" in title
+                or "お探しのページ" in title):
+            return "not_found"
+        if ("403" in tl or "forbidden" in tl or "access denied" in tl
+                or "アクセスできません" in title
+                or "アクセス拒否" in title):
+            return "blocked"
+        return "fetch_failed"
+    if body_text is not None and len(body_text.strip()) < _MIN_BODY_LEN:
+        return "fetch_failed"
+    return None
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e10_classify_title_quality(path: Path):
+    """E10 classify_title_quality: タイトル品質分類"""
+    name = "E10 classify_title_quality 追加"
+    text = path.read_text(encoding="utf-8")
+    if "classify_title_quality" in text or "_NUMERIC_RE" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    func_code = re_import + '''
+_NUMERIC_RE = re.compile(r"^\\d+$")
+
+
+def classify_title_quality(title):
+    if not title or not title.strip():
+        return "no_title"
+    stripped = title.strip()
+    if len(stripped) < 2:
+        return "too_short"
+    if _NUMERIC_RE.match(stripped):
+        return "numeric_only"
+    return "ok"
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e11_extract_page_info(path: Path):
+    """E11 extract_page_info: HTMLからタイトル・本文を抽出"""
+    name = "E11 extract_page_info 追加"
+    text = path.read_text(encoding="utf-8")
+    if "extract_page_info" in text or "_TITLE_RE" in text:
+        skip(name)
+        return
+
+    has_re = ('\nimport re\n' in text or text.startswith('import re\n'))
+    re_import = "" if has_re else "import re\n"
+    has_html_mod = ("import html as _html_mod" in text)
+    html_import = "" if has_html_mod else "import html as _html_mod\n"
+    func_code = re_import + html_import + '''
+_TITLE_RE    = re.compile(r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
+_OG_TITLE_RE = re.compile(r'<meta[^>]+property="og:title"[^>]+content="(.*?)"', re.IGNORECASE)
+_BODY_RE     = re.compile(r'<body[^>]*>(.*?)</body>', re.IGNORECASE | re.DOTALL)
+_TAG_RE      = re.compile(r'<[^>]+>')
+_WS_RE       = re.compile(r'\\s+')
+
+
+def extract_page_info(html: str) -> dict:
+    title = None
+    m = _TITLE_RE.search(html)
+    if m:
+        title = _html_mod.unescape(_TAG_RE.sub("", m.group(1))).strip() or None
+    if not title:
+        m = _OG_TITLE_RE.search(html)
+        if m:
+            title = _html_mod.unescape(m.group(1)).strip() or None
+    m = _BODY_RE.search(html)
+    body_html = m.group(1) if m else html
+    body_text = _WS_RE.sub(" ", _TAG_RE.sub(" ", body_html)).strip()
+    body_text = body_text[:1000] if body_text else None
+    return {"title": title, "body_text": body_text}
+
+'''
+
+    for anchor in ["def _is_valid_result_url(", "def is_valid_result_url(", "def is_bad_url("]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+def patch_e12_write_url_results_normalize(path: Path):
+    """E12 write_url_results: hp_url を normalize_url で正規化してから保存"""
+    name = "E12 write_url_results normalize_url 適用"
+    text = path.read_text(encoding="utf-8")
+    if "# E12_normalize" in text:
+        skip(name)
+        return
+    if "normalize_url" not in text:
+        fail(name, "normalize_url 未検出 (E05 を先に適用してください)")
+        return
+    if "write_url_results" not in text:
+        fail(name, "write_url_results 関数が見つかりません")
+        return
+
+    # 書き込み前に normalize を挟む典型パターン
+    candidates = [
+        # パターン1: hp_url=url をそのまま書いているケース
+        (
+            "status='url_found', hp_url=url,",
+            "# E12_normalize\n            hp_url=normalize_url(url) or url,\n            status='url_found', hp_url=normalize_url(url) or url,"
+        ),
+        # パターン2: SET 文で url を直接使うケース
+        (
+            "SET status='url_found', hp_url=?",
+            "SET status='url_found', hp_url=?  -- E12_normalize (normalize before bind)"
+        ),
+    ]
+
+    # 最も単純な追加: write_url_results を見つけて hp_url=url の直前に normalize 行を注入
+    # 既存コードのパターンを検索
+    import re as _re
+    # "hp_url=url" または "hp_url = url" の行を探す
+    m = _re.search(r'([ \t]+)(hp_url\s*=\s*url)(\b)', text)
+    if m:
+        old_line = m.group(0)
+        new_line = m.group(1) + "# E12_normalize\n" + m.group(1) + "hp_url = normalize_url(url) or url"
+        text = text.replace(old_line, new_line, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new_line, old_line, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return
+
+    # パターン: コード内の url_found 書き込みで norm を追加
+    for old_s, new_s in [
+        ("'url_found', url,", "# E12_normalize\n            'url_found', normalize_url(url) or url,"),
+        ('"url_found", url,', '# E12_normalize\n            "url_found", normalize_url(url) or url,'),
+    ]:
+        if old_s in text:
+            text = text.replace(old_s, new_s, 1)
+            path.write_text(text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return
+            path.write_text(text.replace(new_s, old_s, 1), encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return
+
+    fail(name, "write_url_results 内の hp_url=url パターンが見つかりません — 手動確認が必要")
+
+
+def patch_e13_estimate_crawl_progress(path: Path):
+    """E13 estimate_crawl_progress: クロール進捗統計関数追加"""
+    name = "E13 estimate_crawl_progress 追加"
+    text = path.read_text(encoding="utf-8")
+    if "estimate_crawl_progress" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def estimate_crawl_progress(conn) -> dict:
+    """
+    クロール進捗統計を返す。
+    戻り値キー: total, done, skip, pending, url_found, url_failed, error,
+               completion_pct, remaining
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM crawl_queue GROUP BY status"
+    ).fetchall()
+    counts = {r[0]: r[1] for r in rows}
+    total = sum(counts.values())
+    done  = counts.get("done",  0)
+    skip  = counts.get("skip",  0)
+    finished = done + skip
+    return {
+        "total":          total,
+        "done":           done,
+        "skip":           skip,
+        "pending":        counts.get("pending",      0),
+        "url_searching":  counts.get("url_searching",0),
+        "url_found":      counts.get("url_found",    0),
+        "url_failed":     counts.get("url_failed",   0),
+        "scraping":       counts.get("scraping",     0),
+        "error":          counts.get("error",        0),
+        "remaining":      total - finished,
+        "completion_pct": round(finished / total * 100, 2) if total else 0.0,
+    }
+
+'''
+
+    for anchor in ["def estimate_crawl", "def check_db_consistency(", "def reset_stuck("]:
+        if anchor in text and anchor != "def estimate_crawl":
+            text = text.replace(anchor, func_code + anchor, 1)
+            break
+    else:
+        text += func_code
+
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+# ═══════════════════════════════════════════════════════════
+#  watchdog.py パッチ
+# ═══════════════════════════════════════════════════════════
+
+def patch_w01_null_url_watchdog(path: Path):
+    """W01 reset_stuck: url_found(hp_url=NULL) → url_failed"""
+    name = "W01 watchdog url_found(hp_url=NULL) → url_failed"
+    text = path.read_text(encoding="utf-8")
+    if "hp_url IS NULL" in text and "url_failed" in text:
+        skip(name)
+        return
+
+    # reset_stuck 内の commit() の前に追加
+    old_commit = "    conn.commit()\n    logger.info"
+    new_commit = (
+        "    # url_found で hp_url=NULL → url_failed（URL再検索キューへ）\n"
+        "    n_null = conn.execute(\n"
+        "        \"UPDATE crawl_queue SET status='url_failed', attempts=0 \"\n"
+        "        \"WHERE status='url_found' AND hp_url IS NULL\"\n"
+        "    ).rowcount\n"
+        "    if n_null:\n"
+        "        logger.info(f'url_found(hp_url=NULL) → url_failed: {n_null}件')\n"
+        "    conn.commit()\n"
+        "    logger.info"
+    )
+    if old_commit in text:
+        text = text.replace(old_commit, new_commit, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new_commit, old_commit, 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+        return
+
+    # logger.info がない場合の代替パターン
+    old_commit2 = "    db.commit()\n"
+    if old_commit2 in text:
+        new_commit2 = (
+            "    n_null = db.execute(\n"
+            "        \"UPDATE crawl_queue SET status='url_failed', attempts=0 \"\n"
+            "        \"WHERE status='url_found' AND hp_url IS NULL\"\n"
+            "    ).rowcount\n"
+            "    db.commit()\n"
+        )
+        text = text.replace(old_commit2, new_commit2, 1)
+        path.write_text(text, encoding="utf-8")
+        if verify_syntax(path):
+            ok(name)
+            return
+        path.write_text(text.replace(new_commit2, old_commit2, 1), encoding="utf-8")
+
+    fail(name, "reset_stuck の commit パターンが見つかりません — 手動確認が必要")
+
+
+def patch_w02_triage_url_failed(path: Path):
+    """W02 triage_url_failed: url_failed エラー種別ごとの最適再試行戦略"""
+    name = "W02 triage_url_failed 追加"
+    text = path.read_text(encoding="utf-8")
+    if "triage_url_failed" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def triage_url_failed(conn, fetch_failed_max_attempts: int = 3) -> dict:
+    """
+    url_failed のエラー種別ごとに最適なステータスへ移動する。
+    - not_found (404)    : skip（URL自体が存在しない → 諦め）
+    - bad_url (CDN等)    : pending + hp_url クリア（URL再検索）
+    - blocked (403/429)  : pending（後でリトライ）
+    - no_url             : pending + hp_url クリア（URL再検索）
+    - fetch_failed       : attempts 少 → pending リトライ / 多 → skip
+    戻り値: {not_found, bad_url, blocked, no_url, ff_retry, ff_skip}
+    """
+    n_not_found = conn.execute(
+        "UPDATE crawl_queue SET status='skip', error='not_found_permanent' "
+        "WHERE status='url_failed' AND error='not_found'"
+    ).rowcount
+    n_bad_url = conn.execute(
+        "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='bad_url'"
+    ).rowcount
+    n_blocked = conn.execute(
+        "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='blocked'"
+    ).rowcount
+    n_no_url = conn.execute(
+        "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='no_url'"
+    ).rowcount
+    n_ff_retry = conn.execute(
+        "UPDATE crawl_queue SET status='pending', attempts=0, error=NULL "
+        "WHERE status='url_failed' AND error='fetch_failed' AND attempts < ?",
+        (fetch_failed_max_attempts,),
+    ).rowcount
+    n_ff_skip = conn.execute(
+        "UPDATE crawl_queue SET status='skip', error='fetch_failed_permanent' "
+        "WHERE status='url_failed' AND error='fetch_failed' AND attempts >= ?",
+        (fetch_failed_max_attempts,),
+    ).rowcount
+    conn.commit()
+    return {
+        "not_found": n_not_found, "bad_url": n_bad_url,
+        "blocked": n_blocked,     "no_url": n_no_url,
+        "ff_retry": n_ff_retry,   "ff_skip": n_ff_skip,
+    }
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def patch_w03_check_db_consistency(path: Path):
+    """W03 check_db_consistency: DB整合性チェック関数追加"""
+    name = "W03 check_db_consistency 追加"
+    text = path.read_text(encoding="utf-8")
+    if "check_db_consistency" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def check_db_consistency(conn) -> dict:
+    """
+    DB の整合性問題件数を返す（定期監視用）。
+    戻り値キー: url_found_null_url, stuck_url_searching, stuck_scraping,
+               error_fetch_failed, done_no_url
+    """
+    return {
+        "url_found_null_url": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='url_found' AND hp_url IS NULL"
+        ).fetchone()[0],
+        "stuck_url_searching": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='url_searching'"
+        ).fetchone()[0],
+        "stuck_scraping": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='scraping'"
+        ).fetchone()[0],
+        "error_fetch_failed": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='error' AND error LIKE 'fetch_failed%'"
+        ).fetchone()[0],
+        "done_no_url": conn.execute(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status='done' AND hp_url IS NULL"
+        ).fetchone()[0],
+    }
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def patch_w04_duplicate_urls(path: Path):
+    """W04 detect_duplicate_urls / reset_duplicate_urls: ポータルURL検出・リセット"""
+    name = "W04 detect_duplicate_urls / reset_duplicate_urls 追加"
+    text = path.read_text(encoding="utf-8")
+    if "detect_duplicate_urls" in text:
+        skip(name)
+        return
+
+    func_code = '''
+
+def detect_duplicate_urls(conn, threshold: int = 5) -> list:
+    """
+    同一 hp_url が threshold 件以上の企業に割り当てられているものを返す。
+    戻り値: [(hp_url, count), ...] count 降順
+    """
+    rows = conn.execute(
+        "SELECT hp_url, COUNT(*) as cnt FROM crawl_queue "
+        "WHERE status IN ('done','url_found') AND hp_url IS NOT NULL "
+        "GROUP BY hp_url HAVING cnt >= ? ORDER BY cnt DESC",
+        (threshold,),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def reset_duplicate_urls(conn, threshold: int = 5) -> tuple:
+    """
+    重複URLを持つレコードを pending に戻し hp_url をクリアする。
+    戻り値: (crawl_queue リセット件数, corporations クリア件数)
+    """
+    duplicate_urls = [url for url, _ in detect_duplicate_urls(conn, threshold)]
+    if not duplicate_urls:
+        return 0, 0
+    n_queue = n_corps = 0
+    for url in duplicate_urls:
+        n_queue += conn.execute(
+            "UPDATE crawl_queue SET status='pending', hp_url=NULL, attempts=0, error=NULL "
+            "WHERE hp_url=? AND status IN ('done','url_found')",
+            (url,),
+        ).rowcount
+        try:
+            n_corps += conn.execute(
+                "UPDATE corporations SET hp_url=NULL, hp_title=NULL, hp_scraped_at=NULL "
+                "WHERE hp_url=?",
+                (url,),
+            ).rowcount
+        except Exception:
+            pass
+    conn.commit()
+    return n_queue, n_corps
+
+'''
+
+    _append_to_watchdog(path, func_code, name)
+
+
+def _append_to_watchdog(path: Path, func_code: str, name: str):
+    """watchdog.py の末尾（if __name__ == '__main__': の直前）に関数を追加する"""
+    text = path.read_text(encoding="utf-8")
+    # if __name__ ブロックの直前に挿入
+    for anchor in ['if __name__ == "__main__":', "if __name__ == '__main__':"]:
+        if anchor in text:
+            text = text.replace(anchor, func_code + anchor, 1)
+            path.write_text(text, encoding="utf-8")
+            if verify_syntax(path):
+                ok(name)
+                return
+            path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+            fail(name, "構文エラー — ロールバック済み")
+            return
+    # __main__ ブロックがない → ファイル末尾に追加
+    text += func_code
+    path.write_text(text, encoding="utf-8")
+    if verify_syntax(path):
+        ok(name)
+    else:
+        path.write_text(text.replace(func_code, "", 1), encoding="utf-8")
+        fail(name, "構文エラー — ロールバック済み")
+
+
+# ═══════════════════════════════════════════════════════════
+#  メイン
+# ═══════════════════════════════════════════════════════════
+
+def main():
+    print(f"\n{'=' * 65}")
+    print(f"  nta-bot パッチ適用スクリプト")
+    print(f"  enricher: {ENRICHER}")
+    print(f"  watchdog: {WATCHDOG}")
+    print(f"{'=' * 65}\n")
+
+    if not ENRICHER.exists():
+        print(f"{RED}enricher.py が見つかりません: {ENRICHER}{RST}")
+        sys.exit(1)
+    if not WATCHDOG.exists():
+        print(f"{RED}watchdog.py が見つかりません: {WATCHDOG}{RST}")
+        sys.exit(1)
+
+    # バックアップ
+    bak_e = backup(ENRICHER)
+    bak_w = backup(WATCHDOG)
+    print(f"  バックアップ: {bak_e.name}")
+    print(f"  バックアップ: {bak_w.name}\n")
+
+    # ── enricher.py ──────────────────────────────────────────
+    print("▼ enricher.py")
+    e_text = ENRICHER.read_text(encoding="utf-8")
+    patch_e01_skip_domains(e_text, ENRICHER)
+    patch_e02_bad_path_patterns(ENRICHER)
+    patch_e03_bad_schemes_ports(ENRICHER)
+    patch_e04_valid_scheme_ip(ENRICHER)
+    patch_e05_normalize_url(ENRICHER)
+    patch_e06_no_url_url_failed(ENRICHER)
+    patch_e07_is_skip_domain(ENRICHER)
+    patch_e08_trailing_slash(ENRICHER)
+    patch_e09_soft_error_page(ENRICHER)
+    patch_e10_classify_title_quality(ENRICHER)
+    patch_e11_extract_page_info(ENRICHER)
+    patch_e12_write_url_results_normalize(ENRICHER)
+    patch_e13_estimate_crawl_progress(ENRICHER)
+
+    # ── watchdog.py ──────────────────────────────────────────
+    print("\n▼ watchdog.py")
+    patch_w01_null_url_watchdog(WATCHDOG)
+    patch_w02_triage_url_failed(WATCHDOG)
+    patch_w03_check_db_consistency(WATCHDOG)
+    patch_w04_duplicate_urls(WATCHDOG)
+
+    # ── サマリー ─────────────────────────────────────────────
+    print(f"\n{'=' * 65}")
+    print(f"  適用: {len(applied)}件  スキップ(既適用): {len(skipped)}件  "
+          f"失敗: {len(failed)}件")
+    if failed:
+        print(f"\n  {RED}✗ 手動確認が必要なパッチ:{RST}")
+        for f in failed:
+            print(f"    - {f}")
+    print()
+
+    if failed:
+        print("  構文確認...")
+        ok_e = verify_syntax(ENRICHER)
+        ok_w = verify_syntax(WATCHDOG)
+        print(f"    enricher.py: {'OK' if ok_e else 'NG'}")
+        print(f"    watchdog.py: {'OK' if ok_w else 'NG'}")
+        sys.exit(1)
+
+    print(f"  {GREEN}全パッチ完了{RST}")
+    print()
+    print("  次のステップ:")
+    print("    pkill -f watchdog.py")
+    print("    nohup python3 ~/Downloads/nta-bot/tools/nta/bot/watchdog.py "
+          "> ~/Downloads/watchdog.log 2>&1 &")
+    print()
+
+
+if __name__ == "__main__":
+    main()
