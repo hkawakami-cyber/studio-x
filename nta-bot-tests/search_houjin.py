@@ -115,7 +115,7 @@ a:hover {{ text-decoration: underline; }}
   <div class="results">
     <div class="results-header">
       <h3>検索結果</h3>
-      <span class="count">{result_count:,}件</span>
+      <span class="count">{result_count_label}</span>
     </div>
     {table_html}
     {pagination_html}
@@ -211,13 +211,16 @@ class Handler(BaseHTTPRequestHandler):
             ORDER BY q.corporate_number
             LIMIT ? OFFSET ?
         """
-        count_query = f"""
-            SELECT COUNT(*) FROM crawl_queue q
-            LEFT JOIN corporations c ON q.corporate_number = c.corporate_number
-            {where}
-        """
-        total_count = conn.execute("SELECT COUNT(*) FROM crawl_queue").fetchone()[0]
-        result_count = conn.execute(count_query, args).fetchone()[0]
+        total_count = 5_790_765  # cached — full scan is too slow
+        cap = 10_001
+        capped = conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM crawl_queue q"
+            f" LEFT JOIN corporations c ON q.corporate_number = c.corporate_number"
+            f" {where} LIMIT {cap})",
+            args
+        ).fetchone()[0]
+        result_count = capped
+        result_count_label = "10,000件以上" if capped > 10000 else f"{capped:,}件"
         rows = conn.execute(query, args + [per_page, (page-1)*per_page]).fetchall()
 
         q_name = params.get('name', [''])[0]
@@ -259,8 +262,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             table = '<div class="no-results">該当データがありません</div>'
 
-        # Pagination
-        total_pages = (result_count + per_page - 1) // per_page
+        # Pagination — cap at 10000 known results to avoid full scan
+        paginate_count = min(result_count, 10000)
+        total_pages = (paginate_count + per_page - 1) // per_page
         base_params = {k: v[0] for k, v in params.items() if k != 'page'}
         qs_base = '&'.join(f'{k}={quote(str(v))}' for k, v in base_params.items())
 
@@ -283,6 +287,7 @@ class Handler(BaseHTTPRequestHandler):
         html = HTML_TEMPLATE.format(
             total_count=total_count,
             result_count=result_count,
+            result_count_label=result_count_label,
             q_name=q_name, q_city=q_city, q_url=q_url,
             pref_options=pref_opts, kind_options=kind_opts,
             sel_has_url='selected' if q_status=='has_url' else '',
